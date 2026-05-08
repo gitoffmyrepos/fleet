@@ -133,3 +133,14 @@ def test_snapshot_trims_stale_failures() -> None:
     t[0] += 700  # outside window
     snap = cb.snapshot()
     assert snap["failure_count_in_window"] == 0
+
+
+def test_record_success_during_open_is_noop() -> None:
+    t = [0.0]
+    cb = make(lambda: t[0])
+    for _ in range(3):
+        cb.record_failure()
+        t[0] += 1
+    assert cb.state == State.OPEN  # cooldown not elapsed
+    cb.record_success()  # no-op fall-through (neither HALF_OPEN nor CLOSED)
+    assert cb.state == State.OPEN
