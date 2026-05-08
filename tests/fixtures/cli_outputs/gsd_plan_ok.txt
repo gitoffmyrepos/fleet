@@ -1,0 +1,2 @@
+PHASE_DIR=.planning/2026-05-07-add-sse-event/
+PLAN.md written (12 tasks, 4 files)
