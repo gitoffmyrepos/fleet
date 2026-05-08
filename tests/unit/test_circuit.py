@@ -103,3 +103,33 @@ def test_manual_close_resets() -> None:
     cb.close()
     assert cb.state == State.CLOSED
     cb.guard()  # no raise
+
+
+def test_success_in_closed_trims_window() -> None:
+    t = [0.0]
+    cb = make(lambda: t[0])
+    cb.record_failure()  # at t=0
+    t[0] += 700  # outside 600s window
+    cb.record_success()  # should trim the stale failure
+    assert cb.snapshot()["failure_count_in_window"] == 0
+
+
+def test_manual_close_on_half_open() -> None:
+    t = [0.0]
+    cb = make(lambda: t[0])
+    for _ in range(3):
+        cb.record_failure()
+        t[0] += 1
+    t[0] += 301  # cooldown elapsed → HALF_OPEN on next guard
+    cb.guard()  # state now persisted as HALF_OPEN
+    cb.close()  # close() from HALF_OPEN
+    assert cb.state.value == "closed"
+
+
+def test_snapshot_trims_stale_failures() -> None:
+    t = [0.0]
+    cb = make(lambda: t[0])
+    cb.record_failure()  # at t=0
+    t[0] += 700  # outside window
+    snap = cb.snapshot()
+    assert snap["failure_count_in_window"] == 0
