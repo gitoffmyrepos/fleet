@@ -1,0 +1,64 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "fleet.name" . }}
+  labels: {{- include "fleet.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicas }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "fleet.name" . }}
+  template:
+    metadata:
+      labels: {{- include "fleet.labels" . | nindent 8 }}
+    spec:
+      containers:
+        - name: fleet
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: 8000
+          env:
+            - name: FLEET_BEARER_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: fleet-secrets
+                  key: bearer
+            - name: FLEET_GRAPHITI_BEARER
+              valueFrom:
+                secretKeyRef:
+                  name: fleet-secrets
+                  key: graphiti_bearer
+            - name: FLEET_ANTHROPIC_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: fleet-secrets
+                  key: anthropic_api_key
+            - name: FLEET_GRAPHITI_URL
+              value: {{ .Values.env.graphitiUrl | quote }}
+            - name: FLEET_ROUTER_MODEL
+              value: {{ .Values.env.routerModel | quote }}
+            - name: FLEET_PER_TASK_BUDGET_TOKENS
+              value: {{ .Values.env.perTaskBudgetTokens | quote }}
+            - name: FLEET_CACHE_TTL_SECONDS
+              value: {{ .Values.env.cacheTtlSeconds | quote }}
+            - name: FLEET_REGISTRY_REFRESH_SECONDS
+              value: {{ .Values.env.registryRefreshSeconds | quote }}
+            - name: FLEET_DISPATCH_TIMEOUT_SECONDS
+              value: {{ .Values.env.dispatchTimeoutSeconds | quote }}
+            - name: FLEET_LOG_LEVEL
+              value: {{ .Values.env.logLevel | quote }}
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 30
+          resources: {{- toYaml .Values.resources | nindent 12 }}

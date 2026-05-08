@@ -1,0 +1,46 @@
+image:
+  repository: harbor.strategybase.local/fleet/fleet
+  tag: 0.1.0
+  pullPolicy: IfNotPresent
+
+service:
+  type: NodePort
+  port: 8000
+  nodePort: 30801
+
+replicas: 1
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 256Mi
+  limits:
+    cpu: 1000m
+    memory: 1Gi
+
+env:
+  graphitiUrl: "http://graphiti.memory-stack.svc.cluster.local:8000/mcp"
+  routerModel: "claude-sonnet-4-6"
+  perTaskBudgetTokens: "200000"
+  cacheTtlSeconds: "86400"
+  registryRefreshSeconds: "300"
+  dispatchTimeoutSeconds: "1800"
+  logLevel: "INFO"
+
+secrets:
+  bearerVaultPath: "secret/fleet/mcp_bearer"
+  graphitiBearerVaultPath: "secret/fleet/graphiti_bearer"
+  anthropicApiKeyVaultPath: "secret/fleet/anthropic_api_key"
+
+externalSecret:
+  enabled: true
+  secretStoreName: "vault-backend"
+  secretStoreKind: "ClusterSecretStore"
+  refreshInterval: "1h"
+
+networkPolicy:
+  enabled: true
+  allowFromNamespaces:
+    - memory-stack
+    - default
+    - openclaw
