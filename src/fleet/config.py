@@ -1,4 +1,15 @@
-"""Environment-driven configuration."""
+"""Environment-driven configuration.
+
+The path defaults below (`ruflo_cli_path`, `claude_cli_path`, `*_root`) target
+host-mode operation on kelvin's homelab. Containerised deployments MUST
+override them via `FLEET_*` env vars (see `deploy/helm/values.yaml`, added in
+Phase 14).
+
+TODO(Phase 14 hardening): convert `bearer_token`, `graphiti_bearer`, and
+`anthropic_api_key` to `SecretStr` so they don't leak through repr/json/log
+serialisation. Deferred to the Helm/Vault wiring task because the change
+cascades through every downstream caller (`get_secret_value()`).
+"""
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -29,7 +40,7 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
 
     nodeport: int = 30801
-    listen_host: str = "0.0.0.0"
+    listen_host: str = "0.0.0.0"  # bind all interfaces; intended for container/k8s use
     listen_port: int = 8000
 
     ruflo_cli_path: str = "/home/kelvin/.local/bin/claude-flow"
