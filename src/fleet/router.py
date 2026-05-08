@@ -153,6 +153,8 @@ class Router:
         return decision
 
     async def _call_llm(self, task: str, heuristic: RouteDecision) -> RouteDecision:
+        if self._a is None:
+            return self._safe_fallback(heuristic, "llm not configured", degraded=True)
         try:
             msg = await self._a.messages.create(
                 model=self._cfg.router_model,

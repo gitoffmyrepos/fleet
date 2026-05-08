@@ -54,6 +54,10 @@ async def _build_deps(settings: Settings) -> _Deps:
         window_seconds=settings.circuit_window_seconds,
         cooldown_seconds=settings.circuit_cooldown_seconds,
     )
+    # Pre-instantiate the known upstreams so operators can `circuit_close` them
+    # before any dispatch has registered the breaker lazily.
+    for upstream in ("ruflo", "superpowers", "gsd"):
+        circuits.get(upstream)
     rcfg = RegistryConfig(
         sources=[
             {"name": "ruflo", "root": settings.ruflo_agents_root, "pattern": "*.md"},
