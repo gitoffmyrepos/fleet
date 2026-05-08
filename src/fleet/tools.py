@@ -17,6 +17,13 @@ def _new_task_id() -> str:
     return f"task_{uuid.uuid4().hex[:12]}"
 
 
+def _require(a: dict[str, Any], key: str) -> Any:
+    """Get a required arg from MCP args, or raise ToolError with a clear message."""
+    if key not in a or a[key] is None or a[key] == "":
+        raise ToolError(f"'{key}' argument is required")
+    return a[key]
+
+
 class ToolRegistry:
     """Dispatch table mapping MCP tool names to handler coroutines.
 
@@ -55,7 +62,7 @@ class ToolRegistry:
         return await h(args)
 
     async def _route(self, a: dict[str, Any]) -> dict[str, Any]:
-        task = a["task"]
+        task = _require(a, "task")
         task_id = a.get("task_id") or _new_task_id()
         decision = await self._d.router.route(task=task, task_id=task_id)
         return {
@@ -70,15 +77,16 @@ class ToolRegistry:
         }
 
     async def _dispatch_swarm(self, a: dict[str, Any]) -> dict[str, Any]:
+        task = _require(a, "task")
         task_id = a.get("task_id") or _new_task_id()
         scope = list(a.get("scope_paths") or [])
-        h = task_hash(task=a["task"], scope_paths=scope)
+        h = task_hash(task=task, scope_paths=scope)
         cached = await self._d.cache.lookup(h)
         if cached is not None:
             return {"task_id": task_id, "cache_hit": True, **cached}
         result = await self._d.swarm.dispatch(
             task_id=task_id,
-            task=a["task"],
+            task=task,
             agents=int(a.get("agents", 20)),
             topology=a.get("topology", "parallel"),
             strategy=a.get("strategy", "development"),
@@ -94,9 +102,10 @@ class ToolRegistry:
         }
 
     async def _dispatch_phase(self, a: dict[str, Any]) -> dict[str, Any]:
+        task = _require(a, "task")
         task_id = a.get("task_id") or _new_task_id()
         result = await self._d.phase.dispatch(
-            task_id=task_id, task=a["task"], stage=a.get("stage", "plan")
+            task_id=task_id, task=task, stage=a.get("stage", "plan")
         )
         return {
             "task_id": task_id,
@@ -106,9 +115,10 @@ class ToolRegistry:
         }
 
     async def _dispatch_subagent(self, a: dict[str, Any]) -> dict[str, Any]:
+        task = _require(a, "task")
         task_id = a.get("task_id") or _new_task_id()
         result = await self._d.subagent.dispatch(
-            task_id=task_id, task=a["task"], agent_hint=a.get("agent_hint")
+            task_id=task_id, task=task, agent_hint=a.get("agent_hint")
         )
         return {
             "task_id": task_id,
@@ -118,10 +128,9 @@ class ToolRegistry:
         }
 
     async def _dispatch_verify(self, a: dict[str, Any]) -> dict[str, Any]:
+        task = _require(a, "task")
         task_id = a.get("task_id") or _new_task_id()
-        result = await self._d.verify.dispatch(
-            task_id=task_id, task=a["task"], scope=a.get("scope")
-        )
+        result = await self._d.verify.dispatch(task_id=task_id, task=task, scope=a.get("scope"))
         return {
             "task_id": task_id,
             "ok": result.ok,
@@ -147,19 +156,20 @@ class ToolRegistry:
         return {"items": facts, "circuits": self._d.circuits.snapshot_all()}
 
     async def _explain(self, a: dict[str, Any]) -> dict[str, Any]:
-        chain = await self._d.graphiti.search_facts(parent_task_id=a["task_id"], limit=200)
-        return {"task_id": a["task_id"], "chain": chain}
+        task_id = _require(a, "task_id")
+        chain = await self._d.graphiti.search_facts(parent_task_id=task_id, limit=200)
+        return {"task_id": task_id, "chain": chain}
 
     async def _cache_lookup(self, a: dict[str, Any]) -> dict[str, Any]:
-        h = task_hash(task=a["task"], scope_paths=list(a.get("scope_paths") or []))
+        task = _require(a, "task")
+        h = task_hash(task=task, scope_paths=list(a.get("scope_paths") or []))
         hit = await self._d.cache.lookup(h)
         return {"hash": h, "hit": hit is not None, "entry": hit}
 
     async def _list_agents(self, a: dict[str, Any]) -> dict[str, Any]:
-        agents = self._d.registry.all()
         return {
             "stale": self._d.registry.is_stale(),
-            "agents": [asdict(d) if hasattr(d, "__dataclass_fields__") else d for d in agents],
+            "agents": [asdict(d) for d in self._d.registry.all()],
         }
 
     async def _register_agent(self, a: dict[str, Any]) -> dict[str, Any]:
@@ -174,21 +184,24 @@ class ToolRegistry:
         }
 
     async def _telemetry(self, a: dict[str, Any]) -> dict[str, Any]:
+        task_id = _require(a, "task_id")
         await self._d.telemetry.event(
-            task_id=a["task_id"],
+            task_id=task_id,
             kind=a.get("kind", "fleet_external_event"),
             body=a.get("body", {}),
         )
         return {"ok": True}
 
     async def _cancel(self, a: dict[str, Any]) -> dict[str, Any]:
+        task_id = _require(a, "task_id")
         await self._d.telemetry.event(
-            task_id=a["task_id"],
+            task_id=task_id,
             kind="fleet_cancel_requested",
             body={"requested_by": a.get("by", "operator")},
         )
-        return {"task_id": a["task_id"], "cancel_requested": True}
+        return {"task_id": task_id, "cancel_requested": True}
 
     async def _circuit_close(self, a: dict[str, Any]) -> dict[str, Any]:
-        ok = self._d.circuits.close(a["name"])
-        return {"name": a["name"], "closed": bool(ok)}
+        name = _require(a, "name")
+        ok = self._d.circuits.close(name)
+        return {"name": name, "closed": bool(ok)}
