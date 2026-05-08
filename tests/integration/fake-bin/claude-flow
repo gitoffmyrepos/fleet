@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+# fake claude-flow that prints scripted swarm output
+case "$1" in
+  swarm)
+    case "$2" in
+      start)
+        echo "[swarm] starting parallel topology with ${4:-20} agents"
+        echo "[swarm] complete in 3s"
+        echo "RESULT: fake audit complete"
+        exit 0
+        ;;
+    esac
+    ;;
+  hive-mind)
+    echo "[hive] complete in 4s"
+    echo "RESULT: fake hive output"
+    exit 0
+    ;;
+esac
+echo "fake claude-flow: unknown args $*" >&2
+exit 1

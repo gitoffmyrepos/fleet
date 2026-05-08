@@ -1,0 +1,32 @@
+name: integration
+
+on:
+  pull_request:
+  push:
+    branches: [master]
+
+jobs:
+  integration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v3
+        with: { enable-cache: true }
+      - run: uv sync --all-extras --frozen
+      - name: Build and start stack
+        working-directory: tests/integration
+        run: |
+          docker compose up -d --build
+      - name: Run integration tests
+        env:
+          FLEET_URL: http://localhost:18000
+        run: uv run pytest tests/integration -m integration -v
+      - name: Dump logs on failure
+        if: failure()
+        working-directory: tests/integration
+        run: docker compose logs --no-color
+      - name: Tear down
+        if: always()
+        working-directory: tests/integration
+        run: docker compose down -v

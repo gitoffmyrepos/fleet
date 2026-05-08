@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+# fake claude CLI that echoes back a canned response based on the prompt
+prompt=""; while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --print|--output-format) shift 2 ;;
+    *) prompt="$1"; shift ;;
+  esac
+done
+case "$prompt" in
+  *"plan-phase"*) echo "PHASE_DIR=.planning/2026-05-07-fake/" ; echo "PLAN.md written" ;;
+  *"execute-phase"*) echo "12/12 tasks complete" ;;
+  *"verify-work"*) echo "VERDICT: PASS" ;;
+  *"verification-before-completion"*) echo "VERDICT: PASS" ;;
+  *) echo "fake claude: $prompt" ;;
+esac
+exit 0
