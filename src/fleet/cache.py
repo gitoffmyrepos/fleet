@@ -47,7 +47,15 @@ class Cache:
                 },
             )
             return None
-        age = time.time() - float(body["stored_at"])
+        try:
+            age = time.time() - float(body["stored_at"])
+        except (TypeError, ValueError):
+            await self._t.event(
+                task_id=task_hash_value,
+                kind="fleet_cache_corrupt",
+                body={"episode_id": ep.get("id"), "missing_keys": ["stored_at (invalid)"]},
+            )
+            return None
         if age > self._ttl:
             return None
         return {

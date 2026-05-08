@@ -55,7 +55,9 @@ async def test_lookup_miss_returns_none(cache: Cache) -> None:
 
 
 @pytest.mark.asyncio
-async def test_write_then_lookup_hits(cache: Cache, fake_graphiti: AsyncMock) -> None:
+async def test_write_calls_add_episode_with_correct_args(
+    cache: Cache, fake_graphiti: AsyncMock
+) -> None:
     await cache.write(
         task_hash_value="h" * 64,
         kind="swarm",
@@ -120,3 +122,25 @@ async def test_lookup_corrupt_evicts_and_returns_none(fake_graphiti: AsyncMock) 
     tel.event.assert_awaited()
     call = tel.event.await_args
     assert call.kwargs["kind"] == "fleet_cache_corrupt"
+
+
+@pytest.mark.asyncio
+async def test_lookup_invalid_stored_at_evicts_and_returns_none(fake_graphiti: AsyncMock) -> None:
+    fake_graphiti.get_by_hash = AsyncMock(
+        return_value={
+            "id": "ep_y",
+            "body": {
+                "task_hash": "h",
+                "kind": "swarm",
+                "summary": {"text": "x"},
+                "stored_at": "not-a-number",
+            },
+        }
+    )
+    tel = AsyncMock()
+    c = Cache(graphiti=fake_graphiti, telemetry=tel, ttl_seconds=3600)
+    assert await c.lookup("h") is None
+    tel.event.assert_awaited()
+    call = tel.event.await_args
+    assert call.kwargs["kind"] == "fleet_cache_corrupt"
+    assert "stored_at" in call.kwargs["body"]["missing_keys"][0]
