@@ -56,7 +56,7 @@ class DispatcherBase(abc.ABC):
         """
         return None
 
-    def parse_summary(self, stdout: str, **kwargs: Any) -> dict[str, Any]:
+    def parse_summary(self, stdout: str, stderr: str = "", **kwargs: Any) -> dict[str, Any]:
         return {"stdout_tail": stdout[-500:]}
 
     async def dispatch(self, *, task_id: str, **kwargs: Any) -> DispatchResult:
@@ -142,7 +142,7 @@ class DispatcherBase(abc.ABC):
             )
 
         breaker.record_success()
-        summary = self.parse_summary(stdout, **kwargs)
+        summary = self.parse_summary(stdout, stderr, **kwargs)
         await self._t.end(task_id=task_id, ok=True, body={"summary": summary, "exit_code": 0})
         return DispatchResult(
             ok=True,

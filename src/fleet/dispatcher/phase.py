@@ -41,7 +41,7 @@ class PhaseDispatcher(DispatcherBase):
         cmd = _STAGE_TO_CMD.get(stage, "/gsd:plan-phase")
         return [self._claude, "--print", "--output-format", "text", f"{cmd} {task}"]
 
-    def parse_summary(self, stdout: str, **kwargs: Any) -> dict[str, Any]:
+    def parse_summary(self, stdout: str, stderr: str = "", **kwargs: Any) -> dict[str, Any]:
         stage: str = kwargs.get("stage", "plan")
         m = _PHASE_DIR_RE.search(stdout)
         phase_dir: str | None = m.group(1) if m else None

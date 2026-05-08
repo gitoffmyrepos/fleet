@@ -35,7 +35,7 @@ class VerifyDispatcher(DispatcherBase):
             prompt += f" Scope: {scope}"
         return [self._claude, "--print", "--output-format", "text", prompt]
 
-    def parse_summary(self, stdout: str, **kwargs: Any) -> dict[str, Any]:
+    def parse_summary(self, stdout: str, stderr: str = "", **kwargs: Any) -> dict[str, Any]:
         m = _VERDICT_RE.search(stdout)
         verdict = m.group(1).upper() if m else "UNKNOWN"
         return {"verdict": verdict, "stdout_tail": stdout[-1024:]}
