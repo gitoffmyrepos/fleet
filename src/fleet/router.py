@@ -25,10 +25,15 @@ class RouteDecision:
     kind: str  # swarm | phase | subagent | verify | ship
     confidence: float
     reason: str
-    via: str = "heuristic"  # heuristic | llm | fallback
+    via: str = "heuristic"  # heuristic | llm | fallback | caller
     suggested_agents: int | None = None
     suggested_topology: str | None = None
     degraded: bool = False
+    # When True, the caller (an LLM-driven harness like Claude Code / OpenClaw / Goose)
+    # should classify the task using its own LLM context rather than relying on
+    # Fleet's heuristic. Fleet returns a best-guess `kind` as a hint, but caller
+    # is expected to override based on its own judgment of task semantics.
+    requires_caller_classification: bool = False
 
 
 _SWARM_PATTERNS = [
@@ -133,12 +138,40 @@ class Router:
         self._t = telemetry
         self._heuristic = HeuristicGate()
 
-    async def route(self, *, task: str, task_id: str) -> RouteDecision:
+    async def route(
+        self,
+        *,
+        task: str,
+        task_id: str,
+        defer_to_caller: bool = False,
+    ) -> RouteDecision:
+        """Classify a task into a dispatch kind.
+
+        When the heuristic gate yields high confidence (>= threshold), return
+        immediately. Otherwise:
+          - if `defer_to_caller=True`: return the heuristic best-guess with
+            `requires_caller_classification=True`. The calling harness is itself
+            an LLM and should classify using its own session context instead of
+            having Fleet make a server-side LLM call.
+          - else: fall through to Fleet's own LLM (Sonnet by default). Useful
+            for non-LLM callers (scripts, CronJobs, dashboards).
+        """
         h = self._heuristic.classify(task)
         if h.confidence >= self._cfg.router_confidence_threshold:
             decision = h
+        elif defer_to_caller:
+            decision = RouteDecision(
+                kind=h.kind,
+                confidence=h.confidence,
+                reason="low confidence — caller LLM should classify task semantics",
+                via="caller",
+                suggested_agents=h.suggested_agents,
+                suggested_topology=h.suggested_topology,
+                requires_caller_classification=True,
+            )
         else:
             decision = await self._call_llm(task, h)
+        # Telemetry shape adds the new caller-classification flag.
         await self._t.event(
             task_id=task_id,
             kind="fleet_route_decision",

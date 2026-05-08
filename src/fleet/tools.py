@@ -64,7 +64,13 @@ class ToolRegistry:
     async def _route(self, a: dict[str, Any]) -> dict[str, Any]:
         task = _require(a, "task")
         task_id = a.get("task_id") or _new_task_id()
-        decision = await self._d.router.route(task=task, task_id=task_id)
+        # Calling harness can opt into "caller classifies" mode by passing
+        # defer_to_caller=true. LLM-driven harnesses (Claude Code, OpenClaw, Goose
+        # with MiniMax) should pass true so Fleet doesn't burn a server-side LLM
+        # call when the caller already has an LLM context. Non-LLM callers
+        # (scripts, dashboards) leave it false to get Fleet's own LLM fallback.
+        defer = bool(a.get("defer_to_caller", False))
+        decision = await self._d.router.route(task=task, task_id=task_id, defer_to_caller=defer)
         return {
             "task_id": task_id,
             "kind": decision.kind,
@@ -74,6 +80,7 @@ class ToolRegistry:
             "degraded": decision.degraded,
             "suggested_agents": decision.suggested_agents,
             "suggested_topology": decision.suggested_topology,
+            "requires_caller_classification": decision.requires_caller_classification,
         }
 
     async def _dispatch_swarm(self, a: dict[str, Any]) -> dict[str, Any]:
