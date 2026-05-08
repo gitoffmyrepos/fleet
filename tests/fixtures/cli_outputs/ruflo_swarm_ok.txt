@@ -1,0 +1,6 @@
+[swarm] starting parallel topology with 20 agents
+[agent-1] inspecting svc-1
+[agent-2] inspecting svc-2
+...
+[swarm] complete in 47s; 20/20 agents finished
+RESULT: All 73 services healthy. 2 warnings.
