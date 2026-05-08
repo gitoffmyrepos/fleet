@@ -1,0 +1,57 @@
+<!doctype html>
+<html><head>
+<meta charset="utf-8"><title>Fleet</title>
+<style>
+body{font:14px/1.4 -apple-system,sans-serif;margin:24px;color:#222;background:#fafafa}
+h1{margin:0 0 16px;font-size:20px}
+.card{background:#fff;border:1px solid #e3e3e3;border-radius:8px;padding:16px;margin-bottom:16px}
+table{width:100%;border-collapse:collapse}
+th,td{padding:6px 8px;text-align:left;border-bottom:1px solid #f0f0f0;font-variant-numeric:tabular-nums}
+.pill{display:inline-block;padding:2px 8px;border-radius:10px;font-size:12px}
+.closed{background:#dcfce7;color:#166534}
+.open{background:#fee2e2;color:#991b1b}
+.half_open{background:#fef3c7;color:#854d0e}
+.stale{background:#fde68a;color:#854d0e}
+</style>
+</head><body>
+<h1>Fleet</h1>
+
+<div class="card">
+  <strong>Registry</strong> · {{ registry.size }} agents
+  {% if registry.stale %}<span class="pill stale">stale</span>{% endif %}
+</div>
+
+<div class="card">
+  <strong>Circuits</strong>
+  <table>
+    <tr><th>upstream</th><th>state</th><th>failures (window)</th></tr>
+    {% for cb in circuits %}
+    <tr>
+      <td>{{ cb.name }}</td>
+      <td><span class="pill {{ cb.state }}">{{ cb.state }}</span></td>
+      <td>{{ cb.failure_count_in_window }}</td>
+    </tr>
+    {% endfor %}
+  </table>
+</div>
+
+<div class="card">
+  <strong>Recent dispatches</strong>
+  <table>
+    <tr><th>kind</th><th>ok</th><th>duration</th></tr>
+    {% for f in recent %}
+    <tr>
+      <td>{{ f.kind }}</td>
+      <td>{{ f.body.ok if f.body and 'ok' in f.body else '-' }}</td>
+      <td>{{ f.body.duration_seconds if f.body and 'duration_seconds' in f.body else '-' }}</td>
+    </tr>
+    {% endfor %}
+  </table>
+</div>
+
+<div class="card">
+  <small>Auto-refresh every 30s · <a href="/dashboard/metrics.json">metrics.json</a></small>
+</div>
+
+<script>setTimeout(()=>location.reload(),30000)</script>
+</body></html>
