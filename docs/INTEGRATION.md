@@ -152,3 +152,14 @@ Expected:
 ```bash
 goose run -t "use fleet to dispatch a swarm to audit all FX services"
 ```
+
+## Letta proxy — temporary
+
+`/home/kelvin/.local/bin/letta-mcp-proxy` is a Python stdio shim that fixes two upstream bugs in `letta-mcp-server` v2.0.1 (npm `letta-mcp-server@3.0.1`):
+
+- **Bug 1**: rejects `capabilities.sampling: {}` (canonical MCP 2024-11-05 shape) with "invalid type: map, expected unit struct SamplingCapabilities".
+- **Bug 2**: writes ANSI-coloured tracing logs to stdout, corrupting the JSON-RPC frame stream so the official Python `mcp` SDK fails parsing immediately.
+
+Tracking upstream: <https://github.com/oculairmedia/Letta-MCP-server/issues/139>
+
+Once a fix ships, swap all 4 harness configs back to call `letta-mcp` directly and remove `letta-mcp-proxy`.
