@@ -15,7 +15,15 @@ def redact(
     _path: list[str] | None = None,
     _truncated: list[str] | None = None,
 ) -> Any:
-    """Recursively truncate string values >MAX_VALUE_BYTES; record top-level truncated keys."""
+    """Recursively truncate string values larger than MAX_VALUE_BYTES.
+
+    For nested truncations the TOP-LEVEL key is what's reported in the
+    output's `_truncated_keys` marker, not the full dotted path. So
+    `redact({"a": {"b": <huge>}})` will yield `_truncated_keys=["a"]`, not
+    `["a.b"]`. This keeps the marker stable when callers reorganise inner
+    structure; downstream tooling should treat the marker as a hint, not
+    a precise pointer.
+    """
     if _path is None:
         _path = []
     if _truncated is None:
@@ -52,7 +60,8 @@ class Telemetry:
         )
 
     async def end(self, *, task_id: str, ok: bool, body: dict[str, Any]) -> str:
-        elapsed = time.monotonic() - self._starts.pop(task_id, time.monotonic())
+        t0 = self._starts.pop(task_id, None)
+        elapsed = (time.monotonic() - t0) if t0 is not None else 0.0
         return await self._g.add_episode(
             kind="fleet_dispatch_completed" if ok else "fleet_dispatch_failed",
             parent_task_id=task_id,
@@ -60,6 +69,7 @@ class Telemetry:
         )
 
     async def failure(self, *, task_id: str, reason: str, body: dict[str, Any]) -> str:
+        self._starts.pop(task_id, None)
         return await self._g.add_episode(
             kind="fleet_dispatch_failed",
             parent_task_id=task_id,

@@ -81,3 +81,18 @@ async def test_end_without_start_uses_zero_elapsed() -> None:
     assert call.kwargs["kind"] == "fleet_dispatch_failed"
     assert call.kwargs["body"]["duration_seconds"] == 0.0
     assert call.kwargs["body"]["ok"] is False
+
+
+@pytest.mark.asyncio
+async def test_failure_after_start_drains_starts() -> None:
+    fake = AsyncMock()
+    fake.add_episode = AsyncMock(return_value="ep")
+    t = Telemetry(graphiti=fake)
+    await t.start(task_id="t", kind="k", body={})
+    await t.failure(task_id="t", reason="oops", body={})
+    assert "t" not in t._starts
+
+
+def test_redact_nested_truncation_reports_top_level_key() -> None:
+    out = redact({"a": {"b": "x" * 5000}})
+    assert out["_truncated_keys"] == ["a"]
