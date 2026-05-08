@@ -100,13 +100,23 @@ class GraphitiClient:
         `kind` as the episode name. For cache entries, the group_id is namespaced
         per-hash so `get_by_hash` becomes a single-record lookup.
         """
-        episode_uuid = correlation_id or uuid.uuid4().hex
+        # Fleet-side correlation id stored INSIDE the episode body, NOT as the
+        # Graphiti uuid. Graphiti's add_memory treats a supplied uuid as
+        # "update existing node UUID"; passing a fresh one causes "node not
+        # found" and the episode never gets created. Let Graphiti generate
+        # its own internal uuid; Fleet's identifier lives in episode body.
+        fleet_id = correlation_id or uuid.uuid4().hex
         group_id = (
             f"{CACHE_GROUP_PREFIX}:{body['task_hash']}"
             if kind == "fleet_cache_entry" and "task_hash" in body
             else FLEET_GROUP
         )
-        episode = {"body": body, "parent_task_id": parent_task_id, "kind": kind}
+        episode = {
+            "fleet_id": fleet_id,
+            "body": body,
+            "parent_task_id": parent_task_id,
+            "kind": kind,
+        }
         await self._call_tool(
             "add_memory",
             {
@@ -115,10 +125,9 @@ class GraphitiClient:
                 "group_id": group_id,
                 "source": "json",
                 "source_description": "fleet-mcp",
-                "uuid": episode_uuid,
             },
         )
-        return episode_uuid
+        return fleet_id
 
     async def search_facts(
         self,

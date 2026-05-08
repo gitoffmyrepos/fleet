@@ -51,8 +51,12 @@ async def test_add_episode_calls_add_memory_with_auth(client: GraphitiClient) ->
     args = payload["params"]["arguments"]
     assert args["name"] == "fleet_dispatch_started"
     assert args["group_id"] == FLEET_GROUP
-    assert args["uuid"] == "abc123"
+    # uuid is intentionally NOT passed (Graphiti treats supplied uuid as
+    # "update existing node" which causes "node not found"). Fleet's
+    # correlation id lives in episode_body.fleet_id instead.
+    assert "uuid" not in args
     body = json.loads(args["episode_body"])
+    assert body["fleet_id"] == "abc123"
     assert body["parent_task_id"] == "task_xyz"
     assert body["body"] == {"task": "audit"}
 
