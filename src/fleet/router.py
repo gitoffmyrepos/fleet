@@ -5,10 +5,19 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Protocol
 
 from .config import Settings
 from .telemetry import Telemetry
+
+
+class _MessagesAPI(Protocol):
+    async def create(self, **kwargs: Any) -> Any: ...
+
+
+class _AnthropicLike(Protocol):
+    @property
+    def messages(self) -> _MessagesAPI: ...
 
 
 @dataclass(frozen=True)
@@ -116,7 +125,7 @@ class Router:
         self,
         *,
         settings: Settings,
-        anthropic: Any,
+        anthropic: _AnthropicLike,
         telemetry: Telemetry,
     ) -> None:
         self._cfg = settings
@@ -173,17 +182,17 @@ class Router:
         j = s.rfind("}")
         if i < 0 or j <= i:
             return None
+        # `s[i:j+1]` always starts with `{` and ends with `}`, so json.loads
+        # either returns a dict or raises — no non-dict path possible here.
         try:
-            parsed = json.loads(s[i : j + 1])
-            if isinstance(parsed, dict):
-                return parsed
-            return None
+            return json.loads(s[i : j + 1])  # type: ignore[no-any-return]
         except json.JSONDecodeError:
             return None
 
-    @staticmethod
-    def _safe_fallback(heuristic: RouteDecision, reason: str, *, degraded: bool) -> RouteDecision:
-        if heuristic.confidence >= 0.5:
+    def _safe_fallback(
+        self, heuristic: RouteDecision, reason: str, *, degraded: bool
+    ) -> RouteDecision:
+        if heuristic.confidence >= self._cfg.router_safe_fallback_threshold:
             return RouteDecision(
                 kind=heuristic.kind,
                 confidence=heuristic.confidence,
