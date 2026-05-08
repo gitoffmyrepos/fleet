@@ -1,0 +1,20 @@
+name: parity
+
+on:
+  pull_request:
+  schedule:
+    - cron: "0 4 * * *"
+
+jobs:
+  parity:
+    runs-on: self-hosted  # needs claude/goose/openclaw on PATH
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v3
+      - run: uv sync --all-extras --frozen
+      - name: Run parity matrix
+        env:
+          FLEET_URL: ${{ secrets.FLEET_URL_STAGING }}
+          FLEET_BEARER: ${{ secrets.FLEET_BEARER_STAGING }}
+        run: uv run pytest tests/e2e -m e2e -v
