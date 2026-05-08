@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import asdict, dataclass, field
+from dataclasses import fields as dc_fields
 from pathlib import Path
 
 from .graphiti_client import GraphitiClient
@@ -142,13 +143,16 @@ class Registry:
             facts = await self._g.search_facts(kind_prefix="fleet_registry_snapshot", limit=1)
             if facts:
                 snap = (facts[0].get("body") or {}).get("agents", [])
-                defs = [AgentDef(**a) for a in snap]
+                valid_fields = {f.name for f in dc_fields(AgentDef)}
+                defs = [AgentDef(**{k: v for k, v in a.items() if k in valid_fields}) for a in snap]
         else:
             self._stale = False
             await self._save_snapshot(defs)
         self._index = {d.id: d for d in defs}
 
     async def _save_snapshot(self, defs: list[AgentDef]) -> None:
+        # TODO(refresh-loop): when load() runs periodically, hash-dedup against
+        # the newest existing snapshot to avoid unbounded episode churn.
         await self._g.add_episode(
             kind="fleet_registry_snapshot",
             parent_task_id=None,
@@ -164,4 +168,6 @@ class Registry:
             cheapness = -_MODEL_RANK.get((d.model or "").lower() or None, 2)
             ranked.append((score, cheapness, d))
         ranked.sort(key=lambda x: (-x[0], -x[1], x[2].id))
-        return [d for _s, _c, d in ranked[:limit] if _s > 0 or limit > 0][:limit]
+        # NB: zero-score agents are intentionally returned (up to `limit`) so
+        # callers always get a best-effort suggestion when no role-tag match.
+        return [d for _s, _c, d in ranked[:limit]]
