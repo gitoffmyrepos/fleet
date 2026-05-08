@@ -77,7 +77,7 @@ async def _build_deps(settings: Settings) -> _Deps:
         telemetry=telemetry,
         timeout_seconds=settings.dispatch_timeout_seconds,
         cli_path=settings.ruflo_cli_path,
-        workdir="/home/kelvin/.openclaw/workspace/ruflo",
+        workdir=settings.ruflo_workdir,
     )
     phase = PhaseDispatcher(
         circuits=circuits,

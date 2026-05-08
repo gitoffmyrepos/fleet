@@ -44,6 +44,7 @@ class Settings(BaseSettings):
     listen_port: int = 8000
 
     ruflo_cli_path: str = "/home/kelvin/.local/bin/claude-flow"
+    ruflo_workdir: str = "/home/kelvin/.openclaw/workspace/ruflo"
     claude_cli_path: str = "/home/kelvin/.local/bin/claude"
     skills_root: str = "/home/kelvin/.claude/skills"
     commands_root: str = "/home/kelvin/.claude/commands"
