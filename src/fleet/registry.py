@@ -6,29 +6,8 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
-_FRONTMATTER_RE = re.compile(r"^---\n(.*?)\n---", re.DOTALL)
+_FRONTMATTER_RE = re.compile(r"^---\r?\n(.*?)\r?\n---", re.DOTALL)
 _TAG_TOKEN_RE = re.compile(r"[a-z][a-z0-9]{2,}")
-
-
-def namespace_id(source: str, name: str) -> str:
-    return f"{source}:{name}"
-
-
-@dataclass(frozen=True)
-class AgentDef:
-    id: str
-    name: str
-    source: str
-    description: str
-    path: str
-    model: str | None
-    tools: list[str] = field(default_factory=list)
-
-    def role_tags(self) -> set[str]:
-        text = f"{self.name} {self.description}".lower()
-        return {t for t in _TAG_TOKEN_RE.findall(text) if t not in _STOP}
-
-
 _STOP = {
     "the",
     "and",
@@ -55,6 +34,25 @@ _STOP = {
     "where",
     "what",
 }
+
+
+def namespace_id(source: str, name: str) -> str:
+    return f"{source}:{name}"
+
+
+@dataclass(frozen=True)
+class AgentDef:
+    id: str
+    name: str
+    source: str
+    description: str
+    path: str
+    model: str | None
+    tools: list[str] = field(default_factory=list)
+
+    def role_tags(self) -> set[str]:
+        text = f"{self.name} {self.description}".lower()
+        return {t for t in _TAG_TOKEN_RE.findall(text) if t not in _STOP}
 
 
 def _parse_frontmatter(text: str) -> dict[str, str]:

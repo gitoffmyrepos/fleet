@@ -1,4 +1,5 @@
 from pathlib import Path
+from unittest.mock import patch
 
 from fleet.registry import AgentDef, namespace_id, scan_directory
 
@@ -40,3 +41,31 @@ def test_agentdef_role_tags_extracted_from_description() -> None:
     tags = d.role_tags()
     assert "test" in tags
     assert "python" in tags
+
+
+def test_skill_md_falls_back_to_parent_dir_name() -> None:
+    defs = scan_directory(FIXTURES / "sample_anonymous", source="anon", pattern="*/SKILL.md")
+    assert len(defs) == 1
+    assert defs[0].name == "anonymous-skill"
+    assert defs[0].id == "anon:anonymous-skill"
+
+
+def test_scan_directory_skips_unreadable_files(tmp_path: Path) -> None:
+    p = tmp_path / "broken.md"
+    p.write_text("---\nname: x\n---\n")
+    with patch.object(Path, "read_text", side_effect=OSError("permission denied")):
+        defs = scan_directory(tmp_path, source="x", pattern="*.md")
+    assert defs == []
+
+
+def test_scan_directory_missing_root_returns_empty(tmp_path: Path) -> None:
+    defs = scan_directory(tmp_path / "does-not-exist", source="x", pattern="*.md")
+    assert defs == []
+
+
+def test_file_without_frontmatter_uses_path_stem(tmp_path: Path) -> None:
+    (tmp_path / "no-frontmatter.md").write_text("just body content, no frontmatter\n")
+    defs = scan_directory(tmp_path, source="src", pattern="*.md")
+    assert len(defs) == 1
+    assert defs[0].name == "no-frontmatter"
+    assert defs[0].description == ""
