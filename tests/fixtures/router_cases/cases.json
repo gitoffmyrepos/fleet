@@ -1,0 +1,10 @@
+[
+  {"task": "audit health of all 73 microservices", "expected_kind": "swarm"},
+  {"task": "spawn 20 agents to scan logs", "expected_kind": "swarm"},
+  {"task": "add SSE event for tool_dispatched in HUD", "expected_kind": "phase"},
+  {"task": "implement the L18 anomaly detector", "expected_kind": "phase"},
+  {"task": "explain how circuit breakers handle half-open", "expected_kind": "subagent"},
+  {"task": "verify the persona writer works with Graphiti", "expected_kind": "verify"},
+  {"task": "ship the L20 cost tracker", "expected_kind": "ship"},
+  {"task": "merge and tag v0.2", "expected_kind": "ship"}
+]
