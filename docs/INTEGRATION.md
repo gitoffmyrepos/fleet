@@ -103,23 +103,27 @@ disown
 
 Verify: `curl -sf http://127.0.0.1:18001/health`
 
-## Known issues
+## Resolved issues (live rollout findings)
 
-### 1. Graphiti async pipeline stuck (environmental, not Fleet)
+### 1. Graphiti "node not found" — FIXED
 
-`POST /mcp tools/call add_memory` returns 200 OK with `"Episode 'X' queued for processing"`, but `get_episodes` never surfaces the queued episodes. Likely the Graphiti deployment's LLM-extraction worker is missing API credentials and the queue isn't draining.
+**Root cause:** Fleet's `add_episode` was passing a `uuid` field to Graphiti's `add_memory`. Graphiti interprets that as "update existing node UUID" rather than "create with this UUID", so the queue worker logged `Failed to process episode X: node X not found` for every Fleet write.
 
-**Impact:** `/explain`, `/status`, and `cache_lookup` always return empty/miss. Fleet's writes succeed (no errors), they just never become visible to readers.
+**Fix:** Don't pass `uuid` to `add_memory`. Let Graphiti generate its own internal UUIDs. Fleet stores its correlation id (`fleet_id`) inside the JSON `episode_body` instead, so client-side filters in `search_facts`/`explain` still work.
 
-**Fix:** investigate Graphiti pod for LLM credential / worker health. Out of scope for Fleet itself.
+**Verified:** writes now appear in `get_episodes` and surface through Fleet's `/status` and `/explain` endpoints.
 
-### 2. Anthropic API key not configured
+**Operational caveat:** Graphiti's pipeline takes ~5 minutes per episode (OpenAI for entity extraction + Ollama embeddings + Neo4j writes). Live status/explain will lag by that window. For postmortem and audit this is fine; for real-time observability it's slow. Not a Fleet issue — that's how Graphiti is configured.
 
-`FLEET_ANTHROPIC_API_KEY=""` in `.env` because the user's shell env has the key commented out (using a Max plan). The router LLM-fallback (Sonnet 4.6) is unreachable, so any task with low heuristic confidence routes to `subagent` with `degraded=true, reason="llm not configured"`.
+### 2. Anthropic API key — ARCHITECTURAL FIX (defer to caller)
 
-**Impact:** routing accuracy on ambiguous tasks reduces to keyword-heuristic only. Strong matches (audit/all N/parallel/ship/release/verify) still work perfectly via the heuristic gate.
+**Root cause:** Fleet's router was calling its own LLM via Anthropic SDK for ambiguous task classification. That required a billable api03 key. The user's available keys were either $0-credit api03 or rate-limited Max-plan OAuth tokens that the standard SDK can't use.
 
-**Fix:** populate `FLEET_ANTHROPIC_API_KEY` in `.env`, or wire to Bayer-style proxies via custom router-model config.
+**Fix:** Per the user's design intuition, the calling harness (Claude Code, OpenClaw, Goose+MiniMax) is itself an LLM with full context. New parameter `defer_to_caller=true` on `mcp__fleet__route` returns Fleet's heuristic best-guess plus `requires_caller_classification: true`. The harness then classifies in-context using its own LLM session and calls the matching dispatch tool directly. No server-side LLM call needed; no Fleet-side credentials required.
+
+**Side benefit:** Fleet's router is now fully functional with no LLM credentials at all. The Fleet skill `~/.claude/skills/fleet/router/SKILL.md` was updated to instruct callers to always pass `defer_to_caller=true`.
+
+**Non-LLM callers** (cron jobs, dashboards, scripts) leave `defer_to_caller` unset (default `false`) and still get Fleet's own LLM fallback if `FLEET_ANTHROPIC_API_KEY` is configured. If unconfigured, those callers see `via=fallback, reason="llm not configured", kind=subagent` — safe degraded behavior.
 
 ## Test commands
 
