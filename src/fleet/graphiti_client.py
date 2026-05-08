@@ -1,4 +1,13 @@
-"""Thin async client over the Graphiti MCP HTTP surface."""
+"""Thin async client over the Graphiti MCP HTTP surface.
+
+TODO(Phase 14 hardening): exception messages currently embed up to 200 chars
+of the upstream response body for debugging (`r.text[:200]`). For internal
+service-to-service use this is acceptable, but it should be reconsidered if
+exception strings ever reach external log sinks (e.g. Grafana Loki). Options:
+(1) drop the body excerpt from the exception, log it via structlog DEBUG;
+(2) redact known-sensitive patterns. Tracked alongside the SecretStr TODO in
+config.py.
+"""
 
 from __future__ import annotations
 
@@ -42,7 +51,12 @@ class GraphitiClient:
             )
             if r.status_code >= 400:
                 raise RuntimeError(f"graphiti add_episode {r.status_code}: {r.text[:200]}")
-            return str(r.json()["id"])
+            data = r.json()
+            if "id" not in data:
+                raise RuntimeError(
+                    f"graphiti add_episode: response missing 'id' field (status {r.status_code})"
+                )
+            return str(data["id"])
 
     async def search_facts(
         self,
