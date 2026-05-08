@@ -2,8 +2,13 @@
 
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass
+from typing import Any
+
+from .config import Settings
+from .telemetry import Telemetry
 
 
 @dataclass(frozen=True)
@@ -91,4 +96,105 @@ class HeuristicGate:
             reason=f"heuristic match for {kind}",
             suggested_agents=20 if kind == "swarm" else None,
             suggested_topology="parallel" if kind == "swarm" else None,
+        )
+
+
+_LLM_PROMPT = """You are a task router. Classify the task below into exactly one kind:
+- "swarm": parallel fan-out across many similar items (audits, scans, surveys)
+- "phase": multi-step build/refactor that benefits from plan + execute + verify
+- "subagent": a single Q&A or focused investigation
+- "verify": gate-checking that something works
+- "ship": release / deploy / merge / tag
+
+Return ONLY JSON: {"kind":"...","confidence":0.0-1.0,"reason":"..."}
+TASK: %s
+"""
+
+
+class Router:
+    def __init__(
+        self,
+        *,
+        settings: Settings,
+        anthropic: Any,
+        telemetry: Telemetry,
+    ) -> None:
+        self._cfg = settings
+        self._a = anthropic
+        self._t = telemetry
+        self._heuristic = HeuristicGate()
+
+    async def route(self, *, task: str, task_id: str) -> RouteDecision:
+        h = self._heuristic.classify(task)
+        if h.confidence >= self._cfg.router_confidence_threshold:
+            decision = h
+        else:
+            decision = await self._call_llm(task, h)
+        await self._t.event(
+            task_id=task_id,
+            kind="fleet_route_decision",
+            body={
+                "kind": decision.kind,
+                "confidence": decision.confidence,
+                "via": decision.via,
+                "degraded": decision.degraded,
+                "reason": decision.reason[:200],
+            },
+        )
+        return decision
+
+    async def _call_llm(self, task: str, heuristic: RouteDecision) -> RouteDecision:
+        try:
+            msg = await self._a.messages.create(
+                model=self._cfg.router_model,
+                max_tokens=200,
+                messages=[{"role": "user", "content": _LLM_PROMPT % task[:1000]}],
+            )
+            text = "".join(getattr(b, "text", "") for b in msg.content)
+            payload = self._parse_payload(text)
+            if payload is None:
+                return self._safe_fallback(heuristic, "llm returned non-json", degraded=True)
+            kind = payload.get("kind", "subagent")
+            if kind not in {"swarm", "phase", "subagent", "verify", "ship"}:
+                return self._safe_fallback(heuristic, f"llm invalid kind {kind}", degraded=True)
+            return RouteDecision(
+                kind=kind,
+                confidence=float(payload.get("confidence", 0.6)),
+                reason=str(payload.get("reason", ""))[:400],
+                via="llm",
+            )
+        except Exception as e:
+            return self._safe_fallback(heuristic, f"llm error: {type(e).__name__}", degraded=True)
+
+    @staticmethod
+    def _parse_payload(text: str) -> dict[str, Any] | None:
+        s = text.strip()
+        i = s.find("{")
+        j = s.rfind("}")
+        if i < 0 or j <= i:
+            return None
+        try:
+            parsed = json.loads(s[i : j + 1])
+            if isinstance(parsed, dict):
+                return parsed
+            return None
+        except json.JSONDecodeError:
+            return None
+
+    @staticmethod
+    def _safe_fallback(heuristic: RouteDecision, reason: str, *, degraded: bool) -> RouteDecision:
+        if heuristic.confidence >= 0.5:
+            return RouteDecision(
+                kind=heuristic.kind,
+                confidence=heuristic.confidence,
+                reason=reason,
+                via="fallback",
+                degraded=degraded,
+            )
+        return RouteDecision(
+            kind="subagent",
+            confidence=0.3,
+            reason=reason,
+            via="fallback",
+            degraded=degraded,
         )
