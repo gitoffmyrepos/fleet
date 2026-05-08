@@ -37,8 +37,9 @@ def test_cli_args_default(reg: CircuitRegistry, tel: AsyncMock) -> None:
     assert "--agents" in args and "20" in args
 
 
-def test_cli_args_hive_mind_when_topology_hierarchical(
-    reg: CircuitRegistry, tel: AsyncMock
+@pytest.mark.parametrize("topology", ["hive-mind", "hierarchical"])
+def test_cli_args_hive_mind_routes_for_both_topology_aliases(
+    topology: str, reg: CircuitRegistry, tel: AsyncMock
 ) -> None:
     d = SwarmDispatcher(
         circuits=reg,
@@ -47,8 +48,25 @@ def test_cli_args_hive_mind_when_topology_hierarchical(
         cli_path="/usr/bin/claude-flow",
         workdir="/tmp/wd",
     )
-    args = d.cli_args(task="diagnose", agents=10, topology="hive-mind", strategy="analysis")
+    args = d.cli_args(task="diagnose", agents=10, topology=topology, strategy="analysis")
     assert "hive-mind" in args and "spawn" in args
+
+
+def test_env_merges_os_environ_and_sets_fleet_invoked(
+    reg: CircuitRegistry, tel: AsyncMock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("EXISTING_VAR", "x")
+    d = SwarmDispatcher(
+        circuits=reg,
+        telemetry=tel,
+        timeout_seconds=1800,
+        cli_path="/usr/bin/claude-flow",
+        workdir="/tmp/wd",
+    )
+    e = d.env()
+    assert e is not None
+    assert e["EXISTING_VAR"] == "x"
+    assert e["FLEET_INVOKED"] == "1"
 
 
 def test_parse_summary_extracts_result_and_agent_count(

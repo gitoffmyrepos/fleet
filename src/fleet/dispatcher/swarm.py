@@ -20,6 +20,12 @@ class SwarmDispatcher(DispatcherBase):
         self._wd = workdir
 
     def cli_args(self, **kwargs: Any) -> list[str]:
+        """Build claude-flow CLI args.
+
+        Topology routing:
+          - 'hive-mind' / 'hierarchical' → `claude-flow hive-mind spawn ...`
+          - all others (parallel / mesh / star / ring) → `claude-flow swarm start ...`
+        """
         task: str = kwargs["task"]
         agents: int = int(kwargs.get("agents", 20))
         topology: str = kwargs.get("topology", "parallel")
@@ -46,5 +52,7 @@ class SwarmDispatcher(DispatcherBase):
     def parse_summary(self, stdout: str, **kwargs: Any) -> dict[str, Any]:
         agents = int(kwargs.get("agents", 20))
         m = _RESULT_RE.search(stdout)
-        result = m.group(1).strip() if m else stdout[-1024:]
+        # On match: capture the RESULT line. No match: fall back to the stdout tail.
+        # Both paths are capped at 2048 chars to bound telemetry payload size.
+        result = m.group(1).strip() if m else stdout[-2048:]
         return {"agents_used": agents, "result": result[:2048]}
