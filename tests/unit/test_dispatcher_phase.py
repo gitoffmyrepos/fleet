@@ -41,6 +41,8 @@ def test_cli_args_uses_slash_command(reg: CircuitRegistry, tel: AsyncMock) -> No
         ("plan", "/gsd:plan-phase"),
         ("execute", "/gsd:execute-phase"),
         ("verify", "/gsd:verify-work"),
+        ("discuss", "/gsd:discuss-phase"),
+        ("ship", "/gsd:ship"),
     ],
 )
 def test_cli_args_for_each_stage(
@@ -77,3 +79,27 @@ def test_upstream_name_is_gsd(reg: CircuitRegistry, tel: AsyncMock) -> None:
         claude_path="/usr/bin/claude",
     )
     assert d.upstream_name == "gsd"
+
+
+def test_unknown_stage_falls_back_to_plan(reg: CircuitRegistry, tel: AsyncMock) -> None:
+    d = PhaseDispatcher(
+        circuits=reg,
+        telemetry=tel,
+        timeout_seconds=1800,
+        claude_path="/usr/bin/claude",
+    )
+    args = d.cli_args(task="x", stage="bogus-not-a-real-stage")
+    assert "/gsd:plan-phase" in " ".join(args)
+
+
+def test_parse_summary_no_phase_dir_returns_none(reg: CircuitRegistry, tel: AsyncMock) -> None:
+    d = PhaseDispatcher(
+        circuits=reg,
+        telemetry=tel,
+        timeout_seconds=1800,
+        claude_path="/usr/bin/claude",
+    )
+    summary = d.parse_summary("output without that marker line\n", stage="execute", task="x")
+    assert summary["phase_dir"] is None
+    assert summary["stage"] == "execute"
+    assert "output without" in summary["stdout_tail"]
