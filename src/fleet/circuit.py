@@ -125,3 +125,41 @@ class CircuitBreaker:
             "failure_count_in_window": len(self._failures),
             "opened_at": self._opened_at if self._state == State.OPEN else None,
         }
+
+
+class CircuitRegistry:
+    """Named per-upstream `CircuitBreaker` instances, lazy-created on first `get()`."""
+
+    def __init__(
+        self,
+        *,
+        failure_threshold: int,
+        window_seconds: float,
+        cooldown_seconds: float,
+    ) -> None:
+        self._k = failure_threshold
+        self._win = window_seconds
+        self._cool = cooldown_seconds
+        self._items: dict[str, CircuitBreaker] = {}
+
+    def get(self, name: str) -> CircuitBreaker:
+        cb = self._items.get(name)
+        if cb is None:
+            cb = CircuitBreaker(
+                name=name,
+                failure_threshold=self._k,
+                window_seconds=self._win,
+                cooldown_seconds=self._cool,
+            )
+            self._items[name] = cb
+        return cb
+
+    def snapshot_all(self) -> list[dict[str, Any]]:
+        return [cb.snapshot() for cb in self._items.values()]
+
+    def close(self, name: str) -> bool:
+        cb = self._items.get(name)
+        if cb is None:
+            return False
+        cb.close()
+        return True

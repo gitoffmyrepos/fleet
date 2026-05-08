@@ -1,6 +1,6 @@
 import pytest
 
-from fleet.circuit import CircuitBreaker, CircuitOpen, State
+from fleet.circuit import CircuitBreaker, CircuitOpen, CircuitRegistry, State
 
 
 def make(monkey_now):
@@ -144,3 +144,36 @@ def test_record_success_during_open_is_noop() -> None:
     assert cb.state == State.OPEN  # cooldown not elapsed
     cb.record_success()  # no-op fall-through (neither HALF_OPEN nor CLOSED)
     assert cb.state == State.OPEN
+
+
+def test_registry_returns_same_instance_per_name() -> None:
+    reg = CircuitRegistry(failure_threshold=3, window_seconds=600, cooldown_seconds=300)
+    a = reg.get("ruflo")
+    b = reg.get("ruflo")
+    c = reg.get("gsd")
+    assert a is b
+    assert a is not c
+
+
+def test_registry_lists_all() -> None:
+    reg = CircuitRegistry(failure_threshold=3, window_seconds=600, cooldown_seconds=300)
+    for name in ("ruflo", "superpowers", "gsd"):
+        reg.get(name)
+    snaps = reg.snapshot_all()
+    assert {s["name"] for s in snaps} == {"ruflo", "superpowers", "gsd"}
+
+
+def test_registry_close_known_returns_true() -> None:
+    reg = CircuitRegistry(failure_threshold=3, window_seconds=600, cooldown_seconds=300)
+    cb = reg.get("ruflo")
+    cb.record_failure()
+    cb.record_failure()
+    cb.record_failure()
+    assert cb.state == State.OPEN
+    assert reg.close("ruflo") is True
+    assert cb.state == State.CLOSED
+
+
+def test_registry_close_unknown_returns_false() -> None:
+    reg = CircuitRegistry(failure_threshold=3, window_seconds=600, cooldown_seconds=300)
+    assert reg.close("nonexistent") is False
