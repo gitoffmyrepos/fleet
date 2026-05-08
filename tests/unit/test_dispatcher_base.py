@@ -104,3 +104,72 @@ async def test_3_failures_trip_breaker(reg: CircuitRegistry, tel: AsyncMock) -> 
     for i in range(3):
         await d.dispatch(task_id=f"t{i}")
     assert reg.get("trip").snapshot()["state"] == "open"
+
+
+def test_abstract_cannot_instantiate_without_cli_args() -> None:
+    """`DispatcherBase` is abstract; subclasses without cli_args raise on instantiation."""
+
+    class _Bad(DispatcherBase):
+        upstream_name = "bad"
+        # Intentionally does NOT override cli_args
+
+    reg = CircuitRegistry(failure_threshold=3, window_seconds=600, cooldown_seconds=300)
+    tel = AsyncMock()
+    with pytest.raises(TypeError, match="abstract"):
+        _Bad(circuits=reg, telemetry=tel, timeout_seconds=5)
+
+
+@pytest.mark.asyncio
+async def test_default_parse_summary_returns_stdout_tail(
+    reg: CircuitRegistry, tel: AsyncMock
+) -> None:
+    """Subclass that doesn't override parse_summary gets the default tail-500 wrapper."""
+
+    class _NoSummary(DispatcherBase):
+        upstream_name = "no_summary"
+
+        def cli_args(self, **kw: Any) -> list[str]:
+            return ["/bin/sh", "-c", "echo hello world"]
+
+    d = _NoSummary(circuits=reg, telemetry=tel, timeout_seconds=10)
+    result = await d.dispatch(task_id="t_default_summary")
+    assert result.ok is True
+    assert "stdout_tail" in result.summary
+    assert "hello world" in result.summary["stdout_tail"]
+    assert result.duration_seconds > 0  # also verifies Fix D
+
+
+@pytest.mark.asyncio
+async def test_timeout_sigkill_escalation_when_sigterm_ignored(
+    reg: CircuitRegistry, tel: AsyncMock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Cover the SIGKILL escalation path: process ignores SIGTERM, gets SIGKILLed after 5s grace."""
+    import asyncio as _asyncio
+
+    class _Stubborn(DispatcherBase):
+        upstream_name = "stubborn"
+
+        def cli_args(self, **kw: Any) -> list[str]:
+            return ["/bin/sh", "-c", "sleep 30"]
+
+    # Force the inner wait_for(proc.wait()) to also time out, exercising kill() branch.
+    real_wait_for = _asyncio.wait_for
+    call_count = {"n": 0}
+
+    async def fake_wait_for(coro: Any, timeout: float) -> Any:
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            # First call: outer communicate() — let it time out fast.
+            return await real_wait_for(coro, timeout=0.1)
+        if call_count["n"] == 2:
+            # Second call: inner proc.wait() after terminate — also force timeout.
+            raise TimeoutError
+        return await real_wait_for(coro, timeout=timeout)
+
+    monkeypatch.setattr(_asyncio, "wait_for", fake_wait_for)
+
+    d = _Stubborn(circuits=reg, telemetry=tel, timeout_seconds=10)
+    result = await d.dispatch(task_id="t_sigkill")
+    assert result.ok is False
+    assert result.error == "timeout"
+    assert result.duration_seconds > 0
