@@ -28,10 +28,16 @@ class SwarmDispatcher(DispatcherBase):
             (hive-mind is the only command that actually spawns real Claude Code agents)
           - all others (parallel / mesh / star / ring) → also route to hive-mind spawn
             because `claude-flow swarm start` is a stub that only prints a table and exits.
+
+        CRITICAL: --workdir is REQUIRED for file-writing tasks. Without it, spawned
+        agents use their own workspace (default ruflo dir) and changes are never written
+        to the target project. This caused the 2026-05-10 Monty integration failure
+        where 3/4 microservices had zero changes despite swarms completing successfully.
         """
         task: str = kwargs["task"]
         agents: int = int(kwargs.get("agents", 20))
         strategy: str = kwargs.get("strategy", "development")
+        workdir: str = kwargs.get("workdir", self._wd)  # pass project dir explicitly
         # Always use hive-mind spawn --claude — it calls child_process.spawn('claude', ...)
         # which is the only CLI command that actually spawns real agents.
         # swarm start is a stub (only prints a table, no subprocess spawning).
@@ -46,18 +52,28 @@ class SwarmDispatcher(DispatcherBase):
             strategy,
             "-o",
             task,
+            "--workdir",
+            workdir,
         ]
 
     def env(self, **kwargs: Any) -> dict[str, str]:
-        """Return full env with KUBECONFIG preserved.
+        """Return full env with PWD and KUBECONFIG set to project dir.
 
         asyncio.create_subprocess_exec with env= replaces the process env entirely,
-        so we must include KUBECONFIG explicitly (copy from current env).
+        so we must explicitly include PWD (sets Claude Code's CWD so it discovers
+        CLAUDE.md in the target project) and KUBECONFIG.
+
+        The PWD trick: when `workdir` is a subdir of self._wd (ruflo's workspace),
+        we set PWD to workdir so spawned `claude` processes use it as CWD and
+        find CLAUDE.md there. Without this, Claude uses self._wd as CWD, finds
+        the ruflo CLAUDE.md instead of the project's, and works in isolation.
+        This caused the 2026-05-10 Monty integration failure where 3/4
+        microservices had zero disk changes despite swarms completing.
         """
         e = dict(os.environ)
         e["FLEET_INVOKED"] = "1"
-        # Ensure kubectl can reach the cluster — KUBECONFIG may be in parent shell
-        # but we must explicitly include it since we're replacing the whole env.
+        workdir: str = kwargs.get("workdir", self._wd)
+        e["PWD"] = workdir
         if "KUBECONFIG" not in e:
             kube_config = Path.home() / ".kube" / "config"
             if kube_config.exists():

@@ -91,12 +91,20 @@ class ToolRegistry:
         cached = await self._d.cache.lookup(h)
         if cached is not None:
             return {"task_id": task_id, "cache_hit": True, **cached}
+        # workdir: project directory for spawned agents. Defaults to FX repo so
+        # Claude Code finds the correct CLAUDE.md (not ruflo's). Pass a different
+        # path for non-FX tasks. PWD is set in env() so claude uses workdir as CWD.
+        workdir: str = a.get(
+            "workdir",
+            "/home/kelvin/SB-HomeLAb/FX",
+        )
         result = await self._d.swarm.dispatch(
             task_id=task_id,
             task=task,
             agents=int(a.get("agents", 20)),
             topology=a.get("topology", "parallel"),
             strategy=a.get("strategy", "development"),
+            workdir=workdir,
         )
         if result.ok:
             await self._d.cache.write(task_hash_value=h, kind="swarm", summary=result.summary)
