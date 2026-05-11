@@ -31,6 +31,9 @@ class DispatchResult:
     commit_sha: str | None = None
     pushed: bool = False
     persistence_note: str = ""
+    # Isolation — populated when isolation="worktree" was used.
+    worktree_path: str | None = None
+    worktree_branch: str | None = None
 
 
 class DispatcherBase(abc.ABC):
@@ -89,7 +92,6 @@ class DispatcherBase(abc.ABC):
                 duration_seconds=time.monotonic() - t0,
             )
 
-        args = self.cli_args(**kwargs)
         # cwd: where the spawned agent should write. Defaults to the daemon's
         # CWD, which historically caused agents to write to /home/.../fleet/
         # instead of the task's project. Callers SHOULD pass cwd explicitly.
@@ -101,16 +103,53 @@ class DispatcherBase(abc.ABC):
                 error=f"cwd does not exist or is not a directory: {cwd}",
                 duration_seconds=time.monotonic() - t0,
             )
+
+        # Isolation: when isolation="worktree" and cwd is a git repo, create
+        # an isolated git worktree so parallel dispatches against the same
+        # cwd don't cross-contaminate via `git add -A` at commit time.
+        # (2026-05-10 incident: two parallel subagents → first to finish
+        # swept the other's in-flight files into its own commit.)
+        isolation: str | None = kwargs.get("isolation")
+        worktree_path: str | None = None
+        worktree_branch: str | None = None
+        original_cwd = cwd
+        if isolation == "worktree" and cwd:
+            wt_path, wt_branch, wt_err = await self._make_worktree(source_repo=cwd, task_id=task_id)
+            if wt_err:
+                # Worktree creation failed — fall back to shared cwd with a
+                # warning rather than hard-fail. Caller can still proceed.
+                logger.warning(
+                    "worktree isolation failed for %s, falling back to shared cwd: %s",
+                    task_id,
+                    wt_err,
+                )
+            else:
+                cwd = wt_path
+                worktree_path = wt_path
+                worktree_branch = wt_branch
+
+        # If we redirected cwd to a worktree, propagate to BOTH `cwd` and
+        # `workdir` kwargs (the swarm dispatcher uses `workdir` for
+        # --workdir + PWD; subagent + verify + phase use `cwd`).
+        run_kwargs = {**kwargs, "cwd": cwd}
+        if worktree_path:
+            run_kwargs["workdir"] = cwd
+        args = self.cli_args(**run_kwargs)
         await self._t.start(
             task_id=task_id,
             kind=self.upstream_name,
-            body={"args": args[:6], "cwd": cwd or os.getcwd()},
+            body={
+                "args": args[:6],
+                "cwd": cwd or os.getcwd(),
+                "isolation": isolation,
+                "worktree_branch": worktree_branch,
+            },
         )
         proc = await asyncio.create_subprocess_exec(
             *args,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
-            env=self.env(**kwargs),
+            env=self.env(**run_kwargs),
             cwd=cwd,
         )
         try:
@@ -152,6 +191,13 @@ class DispatcherBase(abc.ABC):
                 reason=f"exit_code_{proc.returncode}",
                 body={"exit_code": proc.returncode, "stderr_tail": stderr[-200:]},
             )
+            # Tear down worktree on failure (no commits, no merge).
+            if worktree_path:
+                await self._remove_worktree(
+                    source_repo=original_cwd or worktree_path,
+                    worktree_path=worktree_path,
+                    branch=worktree_branch,
+                )
             return DispatchResult(
                 ok=False,
                 task_id=task_id,
@@ -160,6 +206,8 @@ class DispatcherBase(abc.ABC):
                 error=err,
                 exit_code=proc.returncode,
                 duration_seconds=time.monotonic() - t0,
+                worktree_path=None,
+                worktree_branch=None,
             )
 
         breaker.record_success()
@@ -178,7 +226,27 @@ class DispatcherBase(abc.ABC):
                 cwd=cwd,
                 task_id=task_id,
                 task=str(kwargs.get("task", "")),
+                worktree_branch=worktree_branch,
+                source_repo=original_cwd if worktree_path else None,
             )
+
+        # If we used a worktree, clean it up after commit/push regardless of
+        # outcome — the branch (if any) is already on origin or in the source
+        # repo's refs. The worktree dir itself is ephemeral.
+        wt_path_for_result = worktree_path
+        wt_branch_for_result = worktree_branch
+        if worktree_path:
+            # Only keep the worktree path/branch in the result if no commit
+            # landed — that means the caller may want to inspect manually.
+            kept = commit_sha is None and persistence_note != "no changes to commit"
+            if not kept:
+                await self._remove_worktree(
+                    source_repo=original_cwd or worktree_path,
+                    worktree_path=worktree_path,
+                    branch=worktree_branch,
+                )
+                wt_path_for_result = None
+                wt_branch_for_result = None
 
         await self._t.end(
             task_id=task_id,
@@ -189,6 +257,8 @@ class DispatcherBase(abc.ABC):
                 "commit_sha": commit_sha,
                 "pushed": pushed,
                 "persistence_note": persistence_note,
+                "worktree_path": wt_path_for_result,
+                "worktree_branch": wt_branch_for_result,
             },
         )
         return DispatchResult(
@@ -202,6 +272,8 @@ class DispatcherBase(abc.ABC):
             commit_sha=commit_sha,
             pushed=pushed,
             persistence_note=persistence_note,
+            worktree_path=wt_path_for_result,
+            worktree_branch=wt_branch_for_result,
         )
 
     async def _commit_and_push(
@@ -210,11 +282,18 @@ class DispatcherBase(abc.ABC):
         cwd: str,
         task_id: str,
         task: str,
+        worktree_branch: str | None = None,
+        source_repo: str | None = None,
     ) -> tuple[str | None, bool, str]:
-        """Commit working-tree changes + push the current branch.
+        """Commit working-tree changes + push.
 
         Returns (commit_sha, pushed, note). Never raises — persistence is
         best-effort; the agent's work already happened on disk.
+
+        When worktree_branch is set (isolation="worktree" path), commits on
+        the worktree's branch and pushes it to origin as a feature branch
+        AND fast-forwards origin/master if origin/master == merge-base.
+        That gives us isolation without losing the "lands on master" behavior.
 
         Skips cleanly when cwd isn't a git repo or nothing changed.
         """
@@ -235,6 +314,10 @@ class DispatcherBase(abc.ABC):
             return None, False, "no changes to commit"
 
         # 3. Stage everything (mirrors the user's "commit and push code when done").
+        #    In worktree mode, git's auto-scoping means `git add -A` here only
+        #    touches the isolated working tree — no cross-contamination with
+        #    parallel dispatches operating on the source repo or other
+        #    worktrees.
         rc, _, err = await self._git(repo_top, ["add", "-A"])
         if rc != 0:
             return None, False, f"git add failed: {err.strip()[:200]}"
@@ -249,12 +332,138 @@ class DispatcherBase(abc.ABC):
         rc, sha, _ = await self._git(repo_top, ["rev-parse", "HEAD"])
         commit_sha = sha.strip() if rc == 0 else None
 
-        # 5. Push current branch to origin.
+        # 5. Push.
+        if worktree_branch:
+            # Worktree path: push the feature branch + try to fast-forward
+            # origin/master so the work lands without manual PR step.
+            rc, _, err = await self._git(
+                repo_top, ["push", "origin", f"HEAD:refs/heads/{worktree_branch}"]
+            )
+            if rc != 0:
+                return (
+                    commit_sha,
+                    False,
+                    (
+                        f"committed locally on {worktree_branch}; push branch failed: "
+                        f"{err.strip()[:200]}"
+                    ),
+                )
+            # Fetch master ref to see if our commit fast-forwards from it.
+            await self._git(repo_top, ["fetch", "origin", "master"])
+            rc, base_sha, _ = await self._git(repo_top, ["merge-base", "HEAD", "origin/master"])
+            rc2, master_sha, _ = await self._git(repo_top, ["rev-parse", "origin/master"])
+            ff_eligible = rc == 0 and rc2 == 0 and base_sha.strip() == master_sha.strip()
+            if ff_eligible:
+                rc, _, err = await self._git(repo_top, ["push", "origin", "HEAD:refs/heads/master"])
+                if rc == 0:
+                    return (
+                        commit_sha,
+                        True,
+                        (
+                            f"committed on worktree branch {worktree_branch}; "
+                            f"fast-forwarded origin/master"
+                        ),
+                    )
+                # FF push failed (someone else pushed concurrently). The
+                # feature branch is still on origin — operator can merge it.
+                return (
+                    commit_sha,
+                    True,
+                    (
+                        f"committed on worktree branch {worktree_branch}; "
+                        f"master FF push lost a race ({err.strip()[:120]}) — "
+                        f"merge {worktree_branch} manually."
+                    ),
+                )
+            return (
+                commit_sha,
+                True,
+                (
+                    f"committed on worktree branch {worktree_branch}; "
+                    f"diverged from origin/master, not auto-merging."
+                ),
+            )
+
+        # Non-worktree path (back-compat): push current branch to origin.
         rc, _, err = await self._git(repo_top, ["push", "origin", "HEAD"])
         if rc != 0:
             return commit_sha, False, f"committed locally but push failed: {err.strip()[:200]}"
 
         return commit_sha, True, "committed and pushed"
+
+    # --------- worktree isolation helpers ----------
+
+    async def _make_worktree(
+        self, *, source_repo: str, task_id: str
+    ) -> tuple[str | None, str | None, str | None]:
+        """Create an isolated git worktree off source_repo's HEAD.
+
+        Returns (worktree_path, branch_name, error). On failure all three
+        are (None, None, error_message) — callers should fall back to
+        shared cwd with a warning.
+
+        Worktrees live under /tmp/fleet-worktrees/<task_id>/ to keep the
+        source repo's tree free of fleet bookkeeping dirs (which would
+        otherwise show up in `git status` and confuse human operators).
+        """
+        # Verify source is a git repo
+        rc, top, _ = await self._git(source_repo, ["rev-parse", "--show-toplevel"])
+        if rc != 0:
+            return None, None, "source is not a git repo"
+        repo_top = top.strip()
+
+        # Worktree path + branch name
+        wt_root = Path("/tmp/fleet-worktrees")
+        wt_root.mkdir(parents=True, exist_ok=True)
+        wt_path = str(wt_root / task_id)
+        if Path(wt_path).exists():
+            # Stale worktree from a crashed previous run — try to remove
+            # cleanly via git so refs/worktrees gets cleaned up too.
+            await self._git(repo_top, ["worktree", "remove", "--force", wt_path])
+            # If still there (race / external removal), nuke it.
+            if Path(wt_path).exists():
+                import shutil
+
+                shutil.rmtree(wt_path, ignore_errors=True)
+        branch = f"fleet/{task_id}"
+
+        # Create branch + worktree in one shot
+        rc, _, err = await self._git(repo_top, ["worktree", "add", "-b", branch, wt_path, "HEAD"])
+        if rc != 0:
+            # Branch may already exist (re-dispatch of same task_id) — try
+            # without -b
+            rc2, _, err2 = await self._git(repo_top, ["worktree", "add", wt_path, branch])
+            if rc2 != 0:
+                return (
+                    None,
+                    None,
+                    (f"git worktree add failed: {err.strip()[:200]} / " f"{err2.strip()[:200]}"),
+                )
+        return wt_path, branch, None
+
+    async def _remove_worktree(
+        self,
+        *,
+        source_repo: str,
+        worktree_path: str,
+        branch: str | None,
+    ) -> None:
+        """Tear down a worktree + its branch. Best-effort, never raises."""
+        try:
+            rc, top, _ = await self._git(source_repo, ["rev-parse", "--show-toplevel"])
+            repo_top = top.strip() if rc == 0 else source_repo
+            # remove the worktree (force in case the agent left dirty files)
+            await self._git(repo_top, ["worktree", "remove", "--force", worktree_path])
+            if branch:
+                # delete the local branch — origin still has it if pushed
+                await self._git(repo_top, ["branch", "-D", branch])
+            # Belt-and-suspenders for case where worktree remove silently failed
+            if Path(worktree_path).exists():
+                import shutil
+
+                shutil.rmtree(worktree_path, ignore_errors=True)
+        except Exception as e:
+            logger.debug("worktree teardown error (non-fatal): %s", e)
 
     @staticmethod
     async def _git(cwd: str, argv: list[str]) -> tuple[int, str, str]:
