@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import uuid
+import warnings
 from dataclasses import asdict
 from typing import Any
 
@@ -24,19 +25,44 @@ def _require(a: dict[str, Any], key: str) -> Any:
     return a[key]
 
 
-# Default project for Fleet-spawned agents when the caller doesn't pass one.
-# Matches the existing dispatch_swarm default. 95% of Fleet work is on FX.
-_DEFAULT_CWD = "/home/kelvin/SB-HomeLAb/FX"
+# 2026-05-11 (opt-1): the prior `_DEFAULT_CWD = "/home/kelvin/SB-HomeLAb/FX"`
+# was a load-bearing assumption that Fleet's primary target was the FX
+# repo. After Nova L18+ became the daily driver, FX-by-default became
+# wrong roughly 50% of the time — silently landing work in the wrong
+# repo. `cwd` is now explicit-required; callers must pass it.
+#
+# Migration grace: callers that pass the old FX literal path still work
+# but emit a DeprecationWarning so any cached external clients surface
+# the new behaviour before fully migrating to explicit cwds.
+
+_FX_LITERAL = "/home/kelvin/SB-HomeLAb/FX"  # legacy sentinel for grace-warning
 
 
 def _resolve_cwd(a: dict[str, Any]) -> str:
     """Resolve the agent working directory from MCP args.
 
-    Accepts (in priority order): cwd, workdir, repo_path. Falls back to the
-    FX repo so existing callers that didn't know to pass cwd keep working —
-    just from a sensible default rather than the daemon's own dir.
+    Accepts (in priority order): ``cwd``, ``workdir``, ``repo_path``.
+    Raises ``ToolError`` when none is provided — the prior FX fallback
+    was retired in 2026-05-11 (opt-1). Callers that pass the legacy FX
+    literal get a one-release DeprecationWarning so cached external
+    clients can flush their assumptions.
     """
-    return a.get("cwd") or a.get("workdir") or a.get("repo_path") or _DEFAULT_CWD
+    cwd = a.get("cwd") or a.get("workdir") or a.get("repo_path")
+    if not cwd:
+        raise ToolError(
+            "cwd is required: pass {'cwd': '/full/path/to/repo'}. "
+            "The prior FX-by-default fallback was removed in 2026-05-11 "
+            "(opt-1) because Nova-and-other-repo work was silently landing "
+            "in FX."
+        )
+    if cwd == _FX_LITERAL:
+        warnings.warn(
+            "Passing the literal old FX default path — confirm this is "
+            "intentional; the implicit fallback was removed in opt-1.",
+            DeprecationWarning,
+            stacklevel=3,
+        )
+    return cwd
 
 
 def _result_dict(task_id: str, result: Any) -> dict[str, Any]:
@@ -70,6 +96,10 @@ class ToolRegistry:
             "dispatch_swarm": self._dispatch_swarm,
             "dispatch_phase": self._dispatch_phase,
             "dispatch_subagent": self._dispatch_subagent,
+            # 2026-05-11 symbiosis-3: cheaper-model routing for batch work.
+            "dispatch_subagent_cheap": self._dispatch_subagent_cheap,
+            # 2026-05-11 symbiosis-4: MCP-server + tool allowlist inheritance.
+            "dispatch_subagent_inherit": self._dispatch_subagent_inherit,
             "dispatch_verify": self._dispatch_verify,
             "ship": self._ship,
             "status": self._status,
@@ -192,6 +222,125 @@ class ToolRegistry:
             skill_roots=skill_payload["roots"],
         )
         return _result_dict(task_id, result)
+
+    async def _dispatch_subagent_cheap(self, a: dict[str, Any]) -> dict[str, Any]:
+        """2026-05-11 (symbiosis-3): subagent with cheaper-model routing.
+
+        Closes the Hermes-vs-Fleet head-to-head gap on cost. Defaults to
+        ``haiku`` (claude-haiku-4-5) which is ~12x cheaper than the
+        default opus path while remaining capable for batch summarisation,
+        classification, and translation jobs. Operators can pass
+        ``model="sonnet"|"opus"|<full-model-id>`` to override.
+        """
+        task = _require(a, "task")
+        task_id = a.get("task_id") or _new_task_id()
+        cwd = _resolve_cwd(a)
+        model_alias = a.get("model", "haiku")
+        # Friendly alias → canonical Anthropic id mapping. Pass-through for
+        # anything starting with ``claude-`` so callers can target specific
+        # snapshots (e.g. claude-haiku-4-5-20251001).
+        _ALIASES = {
+            "haiku": "claude-haiku-4-5",
+            "sonnet": "claude-sonnet-4-6",
+            "opus": "claude-opus-4-7",
+        }
+        model = _ALIASES.get(model_alias, model_alias)
+        isolation = a.get("isolation", "worktree")
+        skill_kind = a.get("route_kind") or "subagent"
+        skill_limit = int(a.get("skill_limit", 15))
+        skill_payload = await self._build_skill_payload(skill_kind, skill_limit)
+        result = await self._d.subagent.dispatch(
+            task_id=task_id,
+            task=task,
+            agent_hint=a.get("agent_hint"),
+            cwd=cwd,
+            auto_commit=bool(a.get("auto_commit", True)),
+            isolation=isolation,
+            skill_header=skill_payload["header"],
+            skill_roots=skill_payload["roots"],
+            model=model,
+        )
+        return {**_result_dict(task_id, result), "model": model}
+
+    async def _dispatch_subagent_inherit(self, a: dict[str, Any]) -> dict[str, Any]:
+        """2026-05-11 (symbiosis-4): subagent with MCP/tool allowlist inheritance.
+
+        Closes the Hermes-vs-Fleet head-to-head gap on toolset
+        inheritance. Caller passes:
+
+        * ``mcp_servers`` — list[str] of MCP server names the child must
+          see (e.g. ``["fleet", "graphiti"]``). Names are resolved against
+          ``~/.claude.json`` and the matching configs are written to a
+          temporary ``--mcp-config`` file that only includes those servers.
+        * ``allowed_tools`` — optional list[str] override for the child's
+          ``--allowedTools`` whitelist.
+
+        The temp file is cleaned up in a finally block after dispatch.
+        """
+        import contextlib
+        import json
+        import tempfile
+        from pathlib import Path
+
+        task = _require(a, "task")
+        task_id = a.get("task_id") or _new_task_id()
+        cwd = _resolve_cwd(a)
+        mcp_servers: list[str] = list(a.get("mcp_servers") or [])
+        allowed_tools = a.get("allowed_tools")
+
+        mcp_config_path: str | None = None
+        if mcp_servers:
+            # Source canonical MCP config — ~/.claude.json holds the master
+            # registry used by Claude Code itself.
+            canonical = Path.home() / ".claude.json"
+            try:
+                full = json.loads(canonical.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError) as exc:
+                raise ToolError(
+                    f"could not read canonical MCP config at {canonical}: {exc}"
+                ) from exc
+            full_servers = full.get("mcpServers") or {}
+            filtered = {name: full_servers[name] for name in mcp_servers if name in full_servers}
+            missing = [name for name in mcp_servers if name not in full_servers]
+            if missing:
+                raise ToolError(f"requested MCP servers not in {canonical}: {missing}")
+            # delete=False because we need the file to outlive the with-block;
+            # final cleanup is in the outer finally.
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                suffix=".json",
+                prefix=f"fleet-mcp-{task_id}-",
+                delete=False,
+            ) as tmp:
+                json.dump({"mcpServers": filtered}, tmp)
+                mcp_config_path = tmp.name
+
+        try:
+            isolation = a.get("isolation", "worktree")
+            skill_kind = a.get("route_kind") or "subagent"
+            skill_limit = int(a.get("skill_limit", 15))
+            skill_payload = await self._build_skill_payload(skill_kind, skill_limit)
+            result = await self._d.subagent.dispatch(
+                task_id=task_id,
+                task=task,
+                agent_hint=a.get("agent_hint"),
+                cwd=cwd,
+                auto_commit=bool(a.get("auto_commit", True)),
+                isolation=isolation,
+                skill_header=skill_payload["header"],
+                skill_roots=skill_payload["roots"],
+                allowed_tools=allowed_tools,
+                mcp_config_path=mcp_config_path,
+            )
+            return {
+                **_result_dict(task_id, result),
+                "mcp_servers_inherited": mcp_servers,
+                "allowed_tools_override": allowed_tools is not None,
+            }
+        finally:
+            if mcp_config_path:
+                with contextlib.suppress(OSError):
+                    Path(mcp_config_path).unlink(missing_ok=True)
 
     async def _build_skill_payload(self, kind: str, limit: int) -> dict[str, Any]:
         """Load + filter skills, return (header, roots) for dispatcher injection."""

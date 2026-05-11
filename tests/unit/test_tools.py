@@ -22,15 +22,21 @@ def deps() -> MagicMock:
     return d
 
 
-def test_lists_15_tools(deps: MagicMock) -> None:
+def test_lists_17_tools(deps: MagicMock) -> None:
+    """2026-05-11: two new dispatchers landed for symbiosis with Hermes —
+    dispatch_subagent_cheap (model routing) and dispatch_subagent_inherit
+    (MCP/tool allowlist inheritance). See /tmp/hermes-vs-fleet.md §4.
+    """
     r = ToolRegistry(deps)
     names = r.list_tool_names()
-    assert len(names) == 15
+    assert len(names) == 17
     expected = {
         "route",
         "dispatch_swarm",
         "dispatch_phase",
         "dispatch_subagent",
+        "dispatch_subagent_cheap",
+        "dispatch_subagent_inherit",
         "dispatch_verify",
         "ship",
         "status",
@@ -86,11 +92,28 @@ async def test_circuit_close_calls_registry(deps: MagicMock) -> None:
 @pytest.mark.parametrize(
     "tool,args,expected_keys",
     [
-        ("dispatch_swarm", {"task": "x"}, {"task_id", "cache_hit", "ok", "summary", "error"}),
-        ("dispatch_phase", {"task": "x"}, {"task_id", "ok", "summary", "error"}),
-        ("dispatch_subagent", {"task": "x"}, {"task_id", "ok", "summary", "error"}),
-        ("dispatch_verify", {"task": "x"}, {"task_id", "ok", "summary", "error"}),
-        ("ship", {}, {"task_id", "ok", "summary", "error"}),
+        # 2026-05-11 (opt-1): every dispatcher now requires explicit cwd.
+        (
+            "dispatch_swarm",
+            {"task": "x", "cwd": "/tmp/wd"},
+            {"task_id", "cache_hit", "ok", "summary", "error"},
+        ),
+        (
+            "dispatch_phase",
+            {"task": "x", "cwd": "/tmp/wd"},
+            {"task_id", "ok", "summary", "error"},
+        ),
+        (
+            "dispatch_subagent",
+            {"task": "x", "cwd": "/tmp/wd"},
+            {"task_id", "ok", "summary", "error"},
+        ),
+        (
+            "dispatch_verify",
+            {"task": "x", "cwd": "/tmp/wd"},
+            {"task_id", "ok", "summary", "error"},
+        ),
+        ("ship", {"cwd": "/tmp/wd"}, {"task_id", "ok", "summary", "error"}),
         ("status", {}, {"items", "circuits"}),
         ("explain", {"task_id": "t1"}, {"task_id", "chain"}),
         ("cache_lookup", {"task": "x"}, {"hash", "hit", "entry"}),
