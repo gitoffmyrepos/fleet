@@ -9,15 +9,36 @@ TODO(Phase 14 hardening): convert `bearer_token`, `graphiti_bearer`, and
 `anthropic_api_key` to `SecretStr` so they don't leak through repr/json/log
 serialisation. Deferred to the Helm/Vault wiring task because the change
 cascades through every downstream caller (`get_secret_value()`).
+
+2026-05-11 (opt-2): bearer token may be sourced from a file via
+`FLEET_BEARER_TOKEN_FILE` so the literal doesn't live in .env (which gets
+committed). File contents are read on settings construction with surrounding
+whitespace stripped. `FLEET_BEARER_TOKEN` env var takes precedence if both
+are set (for emergency overrides).
 """
 
+from pathlib import Path
+
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+def _read_token_file(path: str | None) -> str:
+    if not path:
+        return ""
+    p = Path(path).expanduser()
+    if not p.is_file():
+        return ""
+    try:
+        return p.read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
 
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="FLEET_", env_file=".env", extra="ignore")
 
     bearer_token: str = ""
+    bearer_token_file: str = ""
     graphiti_url: str = "http://192.168.119.117:30800/mcp"
     graphiti_bearer: str = ""
 
@@ -53,4 +74,11 @@ class Settings(BaseSettings):
 
 
 def load() -> Settings:
-    return Settings()
+    s = Settings()
+    # 2026-05-11 (opt-2): resolve the file-based bearer when no inline token
+    # is configured. Keeps the literal value out of the .env in git.
+    if not s.bearer_token and s.bearer_token_file:
+        file_token = _read_token_file(s.bearer_token_file)
+        if file_token:
+            s = s.model_copy(update={"bearer_token": file_token})
+    return s
