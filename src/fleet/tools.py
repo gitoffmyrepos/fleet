@@ -76,6 +76,7 @@ class ToolRegistry:
             "explain": self._explain,
             "cache_lookup": self._cache_lookup,
             "list_agents": self._list_agents,
+            "list_skills": self._list_skills,
             "register_agent": self._register_agent,
             "telemetry": self._telemetry,
             "cancel": self._cancel,
@@ -128,6 +129,9 @@ class ToolRegistry:
         # 2026-05-10 issue where agents wrote to the daemon's CWD because
         # the env() PWD trick alone didn't propagate to syscall-level CWD).
         workdir = _resolve_cwd(a)
+        isolation = a.get("isolation", "worktree")
+        skill_kind = a.get("route_kind") or "swarm"
+        skill_payload = await self._build_skill_payload(skill_kind, int(a.get("skill_limit", 15)))
         result = await self._d.swarm.dispatch(
             task_id=task_id,
             task=task,
@@ -137,6 +141,9 @@ class ToolRegistry:
             workdir=workdir,
             cwd=workdir,
             auto_commit=bool(a.get("auto_commit", True)),
+            isolation=isolation,
+            skill_header=skill_payload["header"],
+            skill_roots=skill_payload["roots"],
         )
         if result.ok:
             await self._d.cache.write(task_hash_value=h, kind="swarm", summary=result.summary)
@@ -162,14 +169,44 @@ class ToolRegistry:
         task = _require(a, "task")
         task_id = a.get("task_id") or _new_task_id()
         cwd = _resolve_cwd(a)
+        # Default to worktree isolation so parallel subagents against the
+        # same cwd don't race on `git add -A` at commit time (2026-05-10
+        # incident). Caller can override with isolation=None for legacy
+        # single-agent behavior.
+        isolation = a.get("isolation", "worktree")
+        # Resolve the unified skills catalog + filtered subset for this kind
+        # so the dispatcher can inject a skill header and --add-dir for the
+        # skill roots. The caller can pre-classify via route_kind; otherwise
+        # default to "subagent".
+        skill_kind = a.get("route_kind") or "subagent"
+        skill_limit = int(a.get("skill_limit", 15))
+        skill_payload = await self._build_skill_payload(skill_kind, skill_limit)
         result = await self._d.subagent.dispatch(
             task_id=task_id,
             task=task,
             agent_hint=a.get("agent_hint"),
             cwd=cwd,
             auto_commit=bool(a.get("auto_commit", True)),
+            isolation=isolation,
+            skill_header=skill_payload["header"],
+            skill_roots=skill_payload["roots"],
         )
         return _result_dict(task_id, result)
+
+    async def _build_skill_payload(self, kind: str, limit: int) -> dict[str, Any]:
+        """Load + filter skills, return (header, roots) for dispatcher injection."""
+        from .skills import filter_skills, load_catalog, render_prompt_header
+
+        try:
+            catalog = await load_catalog()
+        except Exception:
+            # Never block a dispatch on a skills lookup error.
+            return {"header": "", "roots": []}
+        filtered = filter_skills(catalog, kind=kind, limit=limit)
+        return {
+            "header": render_prompt_header(filtered),
+            "roots": catalog.get("roots", []),
+        }
 
     async def _dispatch_verify(self, a: dict[str, Any]) -> dict[str, Any]:
         task = _require(a, "task")
@@ -217,6 +254,47 @@ class ToolRegistry:
         return {
             "stale": self._d.registry.is_stale(),
             "agents": [asdict(d) for d in self._d.registry.all()],
+        }
+
+    async def _list_skills(self, a: dict[str, Any]) -> dict[str, Any]:
+        """Return the unified skills catalog (hermes + claude + marketplaces).
+
+        Args (all optional):
+          kind: "swarm"|"phase"|"subagent"|"verify"|"ship" — filter by task type
+          tag: str — exact-match frontmatter tag
+          mcp: str — required MCP server name
+          limit: int (default 50) — cap results
+        """
+        from .skills import filter_skills, load_catalog
+
+        catalog = await load_catalog()
+        filtered = filter_skills(
+            catalog,
+            kind=a.get("kind"),
+            tag=a.get("tag"),
+            mcp=a.get("mcp"),
+            limit=int(a.get("limit", 50)),
+        )
+        # Emit telemetry so we can later see which skills get surfaced.
+        # Telemetry failure is never fatal — swallow + move on.
+        import contextlib
+
+        with contextlib.suppress(Exception):
+            await self._d.telemetry.event(
+                task_id=a.get("task_id") or _new_task_id(),
+                kind="fleet_skills_listed",
+                body={
+                    "kind": a.get("kind"),
+                    "tag": a.get("tag"),
+                    "mcp": a.get("mcp"),
+                    "returned": len(filtered),
+                    "total_catalog": len(catalog.get("skills", [])),
+                },
+            )
+        return {
+            "count": len(filtered),
+            "skills": filtered,
+            "roots": catalog.get("roots", []),
         }
 
     async def _register_agent(self, a: dict[str, Any]) -> dict[str, Any]:

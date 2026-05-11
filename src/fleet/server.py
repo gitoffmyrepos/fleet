@@ -32,6 +32,10 @@ _TOOL_DESCRIPTIONS: dict[str, str] = {
         "Check the deterministic-hash cache for a previous dispatch. Args: task, scope_paths?"
     ),
     "list_agents": "Return the union agent registry across ruflo/superpowers/claude/gsd.",
+    "list_skills": (
+        "Return the unified skills catalog (hermes + claude + marketplaces). "
+        "Args: kind?, tag?, mcp?, limit=50."
+    ),
     "register_agent": ("Log an agent-registration request (registry is filesystem-driven in v1)."),
     "telemetry": "Emit a custom telemetry event to Graphiti. Args: task_id, kind?, body?",
     "cancel": "Request cancellation of an in-flight dispatch. Args: task_id, by?",

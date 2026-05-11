@@ -22,10 +22,10 @@ def deps() -> MagicMock:
     return d
 
 
-def test_lists_14_tools(deps: MagicMock) -> None:
+def test_lists_15_tools(deps: MagicMock) -> None:
     r = ToolRegistry(deps)
     names = r.list_tool_names()
-    assert len(names) == 14
+    assert len(names) == 15
     expected = {
         "route",
         "dispatch_swarm",
@@ -37,6 +37,7 @@ def test_lists_14_tools(deps: MagicMock) -> None:
         "explain",
         "cache_lookup",
         "list_agents",
+        "list_skills",
         "register_agent",
         "telemetry",
         "cancel",

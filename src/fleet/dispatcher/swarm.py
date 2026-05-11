@@ -38,9 +38,13 @@ class SwarmDispatcher(DispatcherBase):
         agents: int = int(kwargs.get("agents", 20))
         strategy: str = kwargs.get("strategy", "development")
         workdir: str = kwargs.get("workdir", self._wd)  # pass project dir explicitly
-        # Always use hive-mind spawn --claude — it calls child_process.spawn('claude', ...)
-        # which is the only CLI command that actually spawns real agents.
-        # swarm start is a stub (only prints a table, no subprocess spawning).
+        skill_header: str = kwargs.get("skill_header") or ""
+        # Prepend the skill catalog header so each spawned hive-mind agent
+        # knows which Skill tools are available before reading the task.
+        # (Skill roots are exposed via --add-dir at the per-agent level
+        # only for subagent dispatch; hive-mind uses --workdir + its own
+        # roots discovery.)
+        objective = f"{skill_header}{task}" if skill_header else task
         return [
             self._cli,
             "hive-mind",
@@ -51,7 +55,7 @@ class SwarmDispatcher(DispatcherBase):
             "-s",
             strategy,
             "-o",
-            task,
+            objective,
             "--workdir",
             workdir,
         ]

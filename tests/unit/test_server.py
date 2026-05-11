@@ -94,4 +94,5 @@ async def test_list_tools_endpoint(deps: MagicMock) -> None:
         assert r.status_code == 200
         names = r.json()["tools"]
         assert "route" in names
-        assert len(names) == 14
+        assert "list_skills" in names
+        assert len(names) == 15
