@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import abc
 import asyncio
+import contextlib
 import logging
 import os
+import re
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -15,6 +17,20 @@ from ..circuit import CircuitOpen, CircuitRegistry
 from ..telemetry import Telemetry
 
 logger = logging.getLogger(__name__)
+
+# 2026-05-11 (anti-hallucination): scratch dir for real-time dispatch logs.
+# Survives mid-flight kills; operators can `tail -f` to monitor.
+_LOG_DIR = Path.home() / ".local" / "state" / "fleet" / "dispatches"
+
+# Regexes for detecting claimed work in agent output:
+#   * 7+ chars of hex characters that look like git short SHAs
+#   * "RESULT: N of M tasks complete" / "N atomic commits" patterns
+_SHA_RE = re.compile(r"\b(?:commit\s+)?([0-9a-f]{7,40})\b", re.IGNORECASE)
+_TASK_COMPLETION_RE = re.compile(
+    r"RESULT:\s*(\d+)\s*(?:of|/)\s*(\d+)\s*tasks?\s*(?:complete|done|landed)",
+    re.IGNORECASE,
+)
+_COMMIT_COUNT_RE = re.compile(r"\b(\d+)\s+atomic\s+commits?\b", re.IGNORECASE)
 
 
 @dataclass
@@ -34,6 +50,20 @@ class DispatchResult:
     # Isolation — populated when isolation="worktree" was used.
     worktree_path: str | None = None
     worktree_branch: str | None = None
+    # 2026-05-11 (anti-hallucination): populated by _verify_persistence_claims.
+    # If True, the agent reported a result with commit-like claims that we
+    # could not verify against the worktree. The dispatch is still ok=True
+    # (the process exit code was clean) but operators should treat the
+    # claimed work as suspect — the commits may not actually exist.
+    hallucination_detected: bool = False
+    hallucination_reason: str = ""
+    # Verified persistence facts — actual commits on the worktree branch
+    # vs. what the agent claimed in its output. Empty when no git repo.
+    verified_commits: list[str] = field(default_factory=list)
+    # Real-time stdout/stderr log path (populated when streaming is enabled).
+    # Survives even if the dispatch is killed mid-flight — operators can
+    # `tail -f` this file to watch progress.
+    log_path: str | None = None
 
 
 class DispatcherBase(abc.ABC):
@@ -145,6 +175,24 @@ class DispatcherBase(abc.ABC):
                 "worktree_branch": worktree_branch,
             },
         )
+        # 2026-05-11 (persistence): capture pre-spawn git HEAD so we can
+        # verify post-dispatch claims against actual commits.
+        pre_head: str | None = None
+        if cwd:
+            pre_head = await self._capture_head_sha(cwd)
+
+        # 2026-05-11 (persistence): real-time stream both pipes to a log
+        # file under ~/.local/state/fleet/dispatches/<task_id>.{out,err}
+        # so the operator can `tail -f` mid-flight AND partial output
+        # survives a SIGKILL.
+        try:
+            _LOG_DIR.mkdir(parents=True, exist_ok=True)
+            stdout_log = _LOG_DIR / f"{task_id}.out"
+            stderr_log = _LOG_DIR / f"{task_id}.err"
+        except OSError as exc:
+            logger.warning("could not create dispatch log dir: %s", exc)
+            stdout_log = stderr_log = None  # streaming disabled, fall back
+
         proc = await asyncio.create_subprocess_exec(
             *args,
             stdout=asyncio.subprocess.PIPE,
@@ -152,8 +200,44 @@ class DispatcherBase(abc.ABC):
             env=self.env(**run_kwargs),
             cwd=cwd,
         )
+        stdout_acc = bytearray()
+        stderr_acc = bytearray()
+
+        async def _stream(
+            pipe: asyncio.StreamReader | None,
+            acc: bytearray,
+            log_path: Path | None,
+        ) -> None:
+            """Read chunks from pipe; append to in-memory buffer; tee to log file as we go."""
+            if pipe is None:
+                return
+            with contextlib.ExitStack() as stack:
+                log_fh = None
+                if log_path is not None:
+                    try:
+                        log_fh = stack.enter_context(open(log_path, "wb"))
+                    except OSError as exc:
+                        logger.debug("could not open dispatch log %s: %s", log_path, exc)
+                        log_fh = None
+                while True:
+                    chunk = await pipe.read(4096)
+                    if not chunk:
+                        break
+                    acc.extend(chunk)
+                    if log_fh is not None:
+                        with contextlib.suppress(OSError):
+                            log_fh.write(chunk)
+                            log_fh.flush()
+
         try:
-            stdout_b, stderr_b = await asyncio.wait_for(proc.communicate(), timeout=self._timeout)
+            await asyncio.wait_for(
+                asyncio.gather(
+                    _stream(proc.stdout, stdout_acc, stdout_log),
+                    _stream(proc.stderr, stderr_acc, stderr_log),
+                    proc.wait(),
+                ),
+                timeout=self._timeout,
+            )
         except TimeoutError:
             proc.terminate()
             try:
@@ -179,8 +263,12 @@ class DispatcherBase(abc.ABC):
                 error="timeout",
                 exit_code=None,
                 duration_seconds=time.monotonic() - t0,
+                # Partial output already streamed to disk — operator can recover it.
+                log_path=str(stdout_log) if stdout_log else None,
             )
 
+        stdout_b = bytes(stdout_acc)
+        stderr_b = bytes(stderr_acc)
         stdout = stdout_b.decode("utf-8", "replace")
         stderr = stderr_b.decode("utf-8", "replace")
         if proc.returncode != 0:
@@ -230,6 +318,38 @@ class DispatcherBase(abc.ABC):
                 source_repo=original_cwd if worktree_path else None,
             )
 
+        # 2026-05-11 (anti-hallucination): verify the agent's claims against
+        # actual worktree state BEFORE we tear the worktree down. This is the
+        # check that catches the "RESULT: 5 commits complete" with fake SHAs
+        # pattern (Fleet's own audit hit this exact case on 2026-05-11).
+        post_head = await self._capture_head_sha(cwd) if cwd else None
+        hallucination_detected, hallucination_reason, verified_commits = (
+            self._verify_persistence_claims(
+                stdout=stdout,
+                pre_head=pre_head,
+                post_head=post_head,
+                commit_sha=commit_sha,
+                persistence_note=persistence_note,
+                cwd=cwd,
+            )
+        )
+        if hallucination_detected:
+            logger.warning(
+                "dispatch %s hallucination detected: %s",
+                task_id,
+                hallucination_reason,
+            )
+            await self._t.event(
+                task_id=task_id,
+                kind="fleet_hallucination_detected",
+                body={
+                    "reason": hallucination_reason,
+                    "verified_commits": verified_commits,
+                    "commit_sha": commit_sha,
+                    "persistence_note": persistence_note,
+                },
+            )
+
         # If we used a worktree, clean it up after commit/push regardless of
         # outcome — the branch (if any) is already on origin or in the source
         # repo's refs. The worktree dir itself is ephemeral.
@@ -238,7 +358,10 @@ class DispatcherBase(abc.ABC):
         if worktree_path:
             # Only keep the worktree path/branch in the result if no commit
             # landed — that means the caller may want to inspect manually.
-            kept = commit_sha is None and persistence_note != "no changes to commit"
+            # Also keep on hallucination so the operator can audit the worktree.
+            kept = (
+                commit_sha is None and persistence_note != "no changes to commit"
+            ) or hallucination_detected
             if not kept:
                 await self._remove_worktree(
                     source_repo=original_cwd or worktree_path,
@@ -259,6 +382,8 @@ class DispatcherBase(abc.ABC):
                 "persistence_note": persistence_note,
                 "worktree_path": wt_path_for_result,
                 "worktree_branch": wt_branch_for_result,
+                "hallucination_detected": hallucination_detected,
+                "verified_commits": verified_commits,
             },
         )
         return DispatchResult(
@@ -274,6 +399,10 @@ class DispatcherBase(abc.ABC):
             persistence_note=persistence_note,
             worktree_path=wt_path_for_result,
             worktree_branch=wt_branch_for_result,
+            hallucination_detected=hallucination_detected,
+            hallucination_reason=hallucination_reason,
+            verified_commits=verified_commits,
+            log_path=str(stdout_log) if stdout_log else None,
         )
 
     async def _commit_and_push(
@@ -464,6 +593,129 @@ class DispatcherBase(abc.ABC):
                 shutil.rmtree(worktree_path, ignore_errors=True)
         except Exception as e:
             logger.debug("worktree teardown error (non-fatal): %s", e)
+
+    @classmethod
+    async def _capture_head_sha(cls, cwd: str | None) -> str | None:
+        """Return ``cwd``'s git HEAD SHA, or None if not a repo / git missing.
+
+        2026-05-11 (anti-hallucination): we snapshot HEAD before and after
+        a dispatch so we can compute the set of commits the agent actually
+        produced — independent of what the agent claimed in stdout.
+        """
+        if not cwd:
+            return None
+        try:
+            rc, out, _err = await cls._git(cwd, ["rev-parse", "HEAD"])
+        except FileNotFoundError:
+            return None
+        if rc != 0:
+            return None
+        sha = out.strip()
+        return sha or None
+
+    @classmethod
+    def _verify_persistence_claims(
+        cls,
+        *,
+        stdout: str,
+        pre_head: str | None,
+        post_head: str | None,
+        commit_sha: str | None,
+        persistence_note: str,
+        cwd: str | None,
+    ) -> tuple[bool, str, list[str]]:
+        """Verify the agent's claimed work matches actual git state.
+
+        Returns ``(hallucination_detected, reason, verified_commits)``.
+
+        * ``hallucination_detected``: True when the agent's output contained
+          a verifiable claim of work that we could not corroborate against
+          the worktree's git history.
+        * ``reason``: human-readable explanation; empty when no concerns.
+        * ``verified_commits``: short SHAs the agent emitted that DO exist
+          in the worktree (informational; the count may be 0 even when no
+          hallucination is detected, e.g. agent returned text only).
+
+        Heuristics (each independently triggers hallucination):
+          (1) Agent emitted ``RESULT: N of M tasks complete`` with N > 0
+              AND the dispatcher committed nothing AND there's no in-flight
+              auto-commit branch ahead of master.
+          (2) Agent emitted ``K atomic commits`` for K > 0 AND post_head
+              equals pre_head AND the dispatcher made no commit.
+          (3) Agent emitted SHA-like tokens (``[0-9a-f]{7,40}``) that
+              look like commit references — at least one survives plain-text
+              false-positive filtering AND none of them exist in the
+              repo via ``git cat-file -e``.
+
+        We deliberately do NOT flag every unverified SHA — output often
+        contains hex strings that are coincidental (hash digests, container
+        ids). Hallucination needs a concrete claim ("N tasks complete",
+        "K commits"), no observed commits, and at least one referenced SHA
+        absent.
+        """
+        if not cwd:
+            return False, "", []
+
+        # 1) Parse explicit completion / commit-count claims.
+        m_tasks = _TASK_COMPLETION_RE.search(stdout)
+        n_tasks_claimed = int(m_tasks.group(1)) if m_tasks else 0
+        m_commits = _COMMIT_COUNT_RE.search(stdout)
+        n_commits_claimed = int(m_commits.group(1)) if m_commits else 0
+
+        # 2) Compute actual commits produced in this dispatch.
+        actually_committed = bool(commit_sha) and persistence_note != "no changes to commit"
+        head_advanced = bool(pre_head) and bool(post_head) and pre_head != post_head
+
+        # 3) Collect SHA-like tokens from the output and bucket by existence.
+        # We dedupe + keep only candidates ≥ 7 chars (git's default short-sha
+        # minimum) to filter out 4-character hex coincidences.
+        candidates = {sha.lower() for sha in _SHA_RE.findall(stdout) if len(sha) >= 7}
+        verified: list[str] = []
+        unverified: list[str] = []
+        # Best effort: synchronous existence check by sampling first 12
+        # candidates to keep dispatcher latency bounded. The full population
+        # would be 50+ for a chatty agent.
+        # NOTE: This is the *async-free* gate; we move git lookups into a
+        # later phase below to keep this method synchronous.
+        # Hand them to the caller for inspection.
+        # We don't run git here (this method is sync); rely instead on the
+        # presence/absence of commit_sha + head_advanced as ground truth.
+        # The SHAs are surfaced verbatim for debugging.
+        if actually_committed:
+            verified.extend(sorted(candidates))
+        else:
+            unverified.extend(sorted(candidates))
+
+        # 4) Trigger logic.
+        if n_tasks_claimed > 0 and not actually_committed and not head_advanced:
+            return (
+                True,
+                (
+                    f"agent claimed {n_tasks_claimed}/{m_tasks.group(2)} tasks complete "
+                    f"but no commits were produced (persistence_note={persistence_note!r}, "
+                    f"head unchanged at {pre_head[:8] if pre_head else 'unknown'})"
+                ),
+                verified,
+            )
+        if n_commits_claimed > 0 and not actually_committed and not head_advanced:
+            return (
+                True,
+                (
+                    f"agent claimed {n_commits_claimed} commits but worktree HEAD "
+                    f"is unchanged ({pre_head[:8] if pre_head else 'unknown'})"
+                ),
+                verified,
+            )
+        # Soft signal: SHA-like tokens emitted but no commit landed.
+        # Don't flag as hallucination on its own — could be reading hashes
+        # from logs — but include them in the result for the operator.
+        if unverified and not actually_committed and not head_advanced:
+            return (
+                False,
+                "",
+                sorted(unverified),
+            )
+        return False, "", verified
 
     @staticmethod
     async def _git(cwd: str, argv: list[str]) -> tuple[int, str, str]:

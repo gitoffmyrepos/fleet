@@ -367,3 +367,102 @@ async def test_worktree_fallback_when_cwd_not_git(
     # The marker landed in the non-git cwd directly (no worktree).
     assert (non_git / "marker.txt").exists()
     assert "not a git repo" in result.persistence_note or result.persistence_note == ""
+
+
+# ─── 2026-05-11 anti-hallucination verification ────────────────────────────────
+
+
+def test_verify_no_claims_no_flag() -> None:
+    """When the agent emits no completion/commit claims, no flag."""
+    flag, reason, verified = DispatcherBase._verify_persistence_claims(
+        stdout="some chatter, nothing structured",
+        pre_head="aaaaaaaaaaaa",
+        post_head="aaaaaaaaaaaa",
+        commit_sha=None,
+        persistence_note="no changes to commit",
+        cwd="/tmp/dummy",
+    )
+    assert flag is False
+    assert reason == ""
+    assert verified == []
+
+
+def test_verify_tasks_claim_without_commits_flags_hallucination() -> None:
+    """Agent says 'RESULT: 5 of 5 tasks complete' but no commit landed → flag.
+
+    This is the exact pattern Fleet's own subagent hit on 2026-05-11:
+    the dispatch reported success with fake commit SHAs, but the worktree
+    HEAD was unchanged and persistence_note was 'no changes to commit'.
+    """
+    flag, reason, _ = DispatcherBase._verify_persistence_claims(
+        stdout=(
+            "Did the work.\n"
+            "Opt-1 e12139a: ...\n"
+            "Opt-4 c4422bf: ...\n"
+            "\nRESULT: 5 of 5 tasks complete\n"
+        ),
+        pre_head="aaaaaaaaaaaa",
+        post_head="aaaaaaaaaaaa",
+        commit_sha=None,
+        persistence_note="no changes to commit",
+        cwd="/tmp/dummy",
+    )
+    assert flag is True
+    assert "5/5 tasks complete" in reason
+    assert "no commits" in reason
+
+
+def test_verify_commits_claim_without_head_advance_flags() -> None:
+    flag, reason, _ = DispatcherBase._verify_persistence_claims(
+        stdout="All 5 atomic commits landed with passing tests.",
+        pre_head="aaaaaaaaaaaa",
+        post_head="aaaaaaaaaaaa",
+        commit_sha=None,
+        persistence_note="no changes to commit",
+        cwd="/tmp/dummy",
+    )
+    assert flag is True
+    assert "5 commits" in reason
+
+
+def test_verify_tasks_claim_with_real_commits_does_not_flag() -> None:
+    """Same claim, but a commit actually landed → no flag."""
+    flag, reason, verified = DispatcherBase._verify_persistence_claims(
+        stdout="RESULT: 5 of 5 tasks complete",
+        pre_head="aaaaaaaaaaaa",
+        post_head="bbbbbbbbbbbb",
+        commit_sha="bbbbbbbbbbbb",
+        persistence_note="ok: 5 commits pushed to origin",
+        cwd="/tmp/dummy",
+    )
+    assert flag is False
+    assert reason == ""
+
+
+def test_verify_no_cwd_returns_clean() -> None:
+    """Without a cwd, verification is a no-op."""
+    flag, reason, verified = DispatcherBase._verify_persistence_claims(
+        stdout="RESULT: 100 of 100 tasks complete",
+        pre_head=None,
+        post_head=None,
+        commit_sha=None,
+        persistence_note="",
+        cwd=None,
+    )
+    assert flag is False
+    assert verified == []
+
+
+def test_verify_short_sha_filter_skips_4char_noise() -> None:
+    """Tokens shorter than 7 chars (e.g. 'abcd' in random docker ids) are
+    not counted as commit references, so no hallucination from coincidence.
+    """
+    flag, reason, _ = DispatcherBase._verify_persistence_claims(
+        stdout="container abc123 started ok",  # 6 chars → too short
+        pre_head="aaaaaaaaaaaa",
+        post_head="aaaaaaaaaaaa",
+        commit_sha=None,
+        persistence_note="",
+        cwd="/tmp/dummy",
+    )
+    assert flag is False
