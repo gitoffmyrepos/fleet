@@ -95,4 +95,7 @@ async def test_list_tools_endpoint(deps: MagicMock) -> None:
         names = r.json()["tools"]
         assert "route" in names
         assert "list_skills" in names
-        assert len(names) == 15
+        # 2026-05-11: +2 tools (dispatch_subagent_cheap + dispatch_subagent_inherit).
+        assert "dispatch_subagent_cheap" in names
+        assert "dispatch_subagent_inherit" in names
+        assert len(names) == 17

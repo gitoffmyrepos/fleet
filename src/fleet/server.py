@@ -24,6 +24,16 @@ _TOOL_DESCRIPTIONS: dict[str, str] = {
     "dispatch_subagent": (
         "Run a single isolated subagent via claude --print. Args: task, agent_hint?"
     ),
+    "dispatch_subagent_cheap": (
+        "Run a single subagent with cheaper-model routing. Args: task, model? "
+        "(haiku|sonnet|opus|<full-id>; default haiku), cwd, agent_hint?"
+    ),
+    "dispatch_subagent_inherit": (
+        "Run a single subagent that inherits a filtered MCP-server + tool "
+        "allowlist from the caller. Args: task, mcp_servers (list[str] of "
+        "server names from ~/.claude.json), allowed_tools? (list[str] override), "
+        "cwd, agent_hint?"
+    ),
     "dispatch_verify": ("Run superpowers verification-before-completion. Args: task, scope?"),
     "ship": "Run gsd:ship — final verification + release prep.",
     "status": "Show recent dispatches + circuit-breaker states.",
