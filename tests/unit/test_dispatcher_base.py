@@ -28,7 +28,7 @@ class _Echo(DispatcherBase):
     def cli_args(self, **kw: Any) -> list[str]:
         return ["/bin/sh", "-c", f"echo '{kw['msg']}'"]
 
-    def parse_summary(self, stdout: str, **kw: Any) -> dict[str, Any]:
+    def parse_summary(self, stdout: str, stderr: str = "", **kw: Any) -> dict[str, Any]:
         return {"out": stdout.strip()}
 
 
@@ -51,7 +51,7 @@ async def test_nonzero_exit_marks_failure(reg: CircuitRegistry, tel: AsyncMock) 
         def cli_args(self, **kw: Any) -> list[str]:
             return ["/bin/sh", "-c", "exit 7"]
 
-        def parse_summary(self, stdout: str, **kw: Any) -> dict[str, Any]:
+        def parse_summary(self, stdout: str, stderr: str = "", **kw: Any) -> dict[str, Any]:
             return {}
 
     d = _Fail(circuits=reg, telemetry=tel, timeout_seconds=5)
@@ -69,7 +69,7 @@ async def test_timeout_returns_partial(reg: CircuitRegistry, tel: AsyncMock) -> 
         def cli_args(self, **kw: Any) -> list[str]:
             return ["/bin/sh", "-c", "sleep 3"]
 
-        def parse_summary(self, stdout: str, **kw: Any) -> dict[str, Any]:
+        def parse_summary(self, stdout: str, stderr: str = "", **kw: Any) -> dict[str, Any]:
             return {}
 
     d = _Sleep(circuits=reg, telemetry=tel, timeout_seconds=1)
@@ -97,7 +97,7 @@ async def test_3_failures_trip_breaker(reg: CircuitRegistry, tel: AsyncMock) -> 
         def cli_args(self, **kw: Any) -> list[str]:
             return ["/bin/sh", "-c", "exit 1"]
 
-        def parse_summary(self, stdout: str, **kw: Any) -> dict[str, Any]:
+        def parse_summary(self, stdout: str, stderr: str = "", **kw: Any) -> dict[str, Any]:
             return {}
 
     d = _Fail(circuits=reg, telemetry=tel, timeout_seconds=5)

@@ -6,6 +6,7 @@ import re
 from typing import Any, ClassVar
 
 from .base import DispatcherBase
+from .claude_args import _claude_args
 
 _VERDICT_RE = re.compile(r"VERDICT:\s*(PASS|FAIL|UNKNOWN)", re.IGNORECASE)
 
@@ -30,10 +31,11 @@ class VerifyDispatcher(DispatcherBase):
     def cli_args(self, **kwargs: Any) -> list[str]:
         task: str = kwargs["task"]
         scope: str | None = kwargs.get("scope")
+        cwd: str | None = kwargs.get("cwd")
         prompt = f"Use the verification-before-completion skill to verify: {task}"
         if scope:
             prompt += f" Scope: {scope}"
-        return [self._claude, "--print", "--output-format", "text", prompt]
+        return _claude_args(self._claude, prompt, cwd=cwd)
 
     def parse_summary(self, stdout: str, stderr: str = "", **kwargs: Any) -> dict[str, Any]:
         m = _VERDICT_RE.search(stdout)

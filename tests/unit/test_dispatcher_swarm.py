@@ -23,6 +23,11 @@ def tel() -> AsyncMock:
 
 
 def test_cli_args_default(reg: CircuitRegistry, tel: AsyncMock) -> None:
+    """All topologies route through `claude-flow hive-mind spawn --claude` because
+    `claude-flow swarm start` is a stub that prints a table without spawning real
+    agents (see SwarmDispatcher.cli_args docstring). Test asserts the actual
+    contract, not the historical/aspirational `swarm start` form.
+    """
     d = SwarmDispatcher(
         circuits=reg,
         telemetry=tel,
@@ -31,10 +36,11 @@ def test_cli_args_default(reg: CircuitRegistry, tel: AsyncMock) -> None:
         workdir="/tmp/wd",
     )
     args = d.cli_args(task="audit svcs", agents=20, topology="parallel", strategy="development")
-    assert "swarm" in args and "start" in args
-    assert "-o" in args
-    assert "audit svcs" in args
-    assert "--agents" in args and "20" in args
+    assert "hive-mind" in args and "spawn" in args and "--claude" in args
+    assert "-o" in args and "audit svcs" in args
+    assert "-n" in args and "20" in args
+    assert "-s" in args and "development" in args
+    assert "--workdir" in args and "/tmp/wd" in args
 
 
 @pytest.mark.parametrize("topology", ["hive-mind", "hierarchical"])

@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any, ClassVar
 
 from .base import DispatcherBase
+from .claude_args import _claude_args
 
 
 class SubagentDispatcher(DispatcherBase):
@@ -17,10 +18,19 @@ class SubagentDispatcher(DispatcherBase):
     def cli_args(self, **kwargs: Any) -> list[str]:
         task: str = kwargs["task"]
         agent_hint: str | None = kwargs.get("agent_hint")
+        cwd: str | None = kwargs.get("cwd")
         prompt = task
         if agent_hint:
             prompt = f"Use agent {agent_hint}. {task}"
-        return [self._claude, "--print", "--output-format", "text", prompt]
+        if cwd:
+            # Tell the agent where its work belongs and that it must persist.
+            prompt = (
+                f"{prompt}\n\n"
+                f"Your working directory is {cwd}. All file changes go there. "
+                f"When the task is complete, your work is automatically committed and "
+                f"pushed by Fleet — you do not need to run git commit/push yourself."
+            )
+        return _claude_args(self._claude, prompt, cwd=cwd)
 
-    def parse_summary(self, stdout: str, **kwargs: Any) -> dict[str, Any]:
+    def parse_summary(self, stdout: str, stderr: str = "", **kwargs: Any) -> dict[str, Any]:
         return {"text_tail": stdout[-2048:]}

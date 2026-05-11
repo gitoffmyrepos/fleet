@@ -6,6 +6,7 @@ import re
 from typing import Any, ClassVar
 
 from .base import DispatcherBase
+from .claude_args import _claude_args
 
 _STAGE_TO_CMD: dict[str, str] = {
     "plan": "/gsd:plan-phase",
@@ -38,8 +39,9 @@ class PhaseDispatcher(DispatcherBase):
     def cli_args(self, **kwargs: Any) -> list[str]:
         task: str = kwargs["task"]
         stage: str = kwargs.get("stage", "plan")
+        cwd: str | None = kwargs.get("cwd")
         cmd = _STAGE_TO_CMD.get(stage, "/gsd:plan-phase")
-        return [self._claude, "--print", "--output-format", "text", f"{cmd} {task}"]
+        return _claude_args(self._claude, f"{cmd} {task}", cwd=cwd)
 
     def parse_summary(self, stdout: str, stderr: str = "", **kwargs: Any) -> dict[str, Any]:
         stage: str = kwargs.get("stage", "plan")
