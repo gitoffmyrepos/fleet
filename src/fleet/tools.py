@@ -66,9 +66,13 @@ def _resolve_cwd(a: dict[str, Any]) -> str:
 
 
 def _result_dict(task_id: str, result: Any) -> dict[str, Any]:
-    """Serialise a DispatchResult into the MCP response shape, including
-    persistence fields (commit_sha, pushed, persistence_note) so the caller
-    knows whether the agent's work landed in git."""
+    """Serialise a DispatchResult into the MCP response shape.
+
+    Includes persistence fields (commit_sha, pushed, persistence_note) so
+    the caller knows whether the agent's work landed in git, plus the
+    2026-05-11 anti-hallucination fields so callers can detect agents
+    that claim work but didn't produce verifiable commits.
+    """
     return {
         "task_id": task_id,
         "ok": result.ok,
@@ -77,6 +81,11 @@ def _result_dict(task_id: str, result: Any) -> dict[str, Any]:
         "commit_sha": getattr(result, "commit_sha", None),
         "pushed": getattr(result, "pushed", False),
         "persistence_note": getattr(result, "persistence_note", ""),
+        # 2026-05-11 anti-hallucination + persistence visibility.
+        "hallucination_detected": getattr(result, "hallucination_detected", False),
+        "hallucination_reason": getattr(result, "hallucination_reason", ""),
+        "verified_commits": getattr(result, "verified_commits", []),
+        "log_path": getattr(result, "log_path", None),
     }
 
 
