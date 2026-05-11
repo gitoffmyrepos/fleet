@@ -39,6 +39,8 @@ def _claude_args(
     cwd: str | None = None,
     extra_dirs: list[str] | None = None,
     allowed_tools: list[str] | None = None,
+    model: str | None = None,
+    mcp_config_path: str | None = None,
 ) -> list[str]:
     """Build a `claude --print` argv list with the right permissions.
 
@@ -50,10 +52,22 @@ def _claude_args(
       interactive prompt that would hang in --print mode).
     - --allowedTools whitelist gives Bash + filesystem + web access without
       the nuclear --dangerously-skip-permissions option.
+
+    2026-05-11 (symbiosis-3): ``model`` plumbs through as ``--model <id>``
+    so callers can pick Haiku for batch / Opus for heavy / etc., closing
+    the cheaper-model-routing gap vs Hermes native delegation.
+
+    2026-05-11 (symbiosis-4): ``mcp_config_path`` points to a temporary
+    MCP-config file (filtered allowlist of the caller's mcp servers).
+    Passed via ``--mcp-config`` so child sees only the desired servers.
     """
     tools = allowed_tools if allowed_tools is not None else _DEFAULT_ALLOWED_TOOLS
     args = [claude_path, "--print", "--output-format", "text"]
 
+    if model:
+        args.extend(["--model", model])
+    if mcp_config_path:
+        args.extend(["--mcp-config", mcp_config_path])
     if cwd:
         args.extend(["--add-dir", cwd])
     if extra_dirs:
