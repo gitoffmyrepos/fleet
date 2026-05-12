@@ -48,10 +48,16 @@ class Settings(BaseSettings):
 
     anthropic_api_key: str = ""
 
-    per_task_budget_tokens: int = 200_000
+    per_task_budget_tokens: int = 300_000  # raised from 200k for deep forensic investigations
     registry_refresh_seconds: int = 300
     cache_ttl_seconds: int = 86_400
-    dispatch_timeout_seconds: int = 1_800
+    # FIX (hermes 2026-05-12): dispatch timeout raised from 1800s (30min) to
+    # 3600s (60min). Hive-mind spawn with 20 agents doing deep forensic
+    # analysis across 100+ microservices easily exceeds 30 minutes. The
+    # subprocess is killed by the kernel before it can finish, causing
+    # Fleet MCP timeout errors. 60min gives enough runway for any realistic
+    # investigation task while still being bounded.
+    dispatch_timeout_seconds: int = 3_600
 
     circuit_failure_threshold: int = 3
     circuit_window_seconds: int = 600
