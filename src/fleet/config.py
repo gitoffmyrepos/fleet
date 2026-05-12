@@ -15,6 +15,14 @@ cascades through every downstream caller (`get_secret_value()`).
 committed). File contents are read on settings construction with surrounding
 whitespace stripped. `FLEET_BEARER_TOKEN` env var takes precedence if both
 are set (for emergency overrides).
+
+2026-05-12 (zero-downtime rotation): `FLEET_BEARER_TOKEN_PREVIOUS` is
+accepted as a secondary token during a rotation window. The fleet-rotate-
+token helper sets this to the OLD value when it writes the new one, restarts
+Fleet, then rotates client configs, then restarts Fleet AGAIN with the
+previous-token unset. Result: zero 401s during rotation — clients that
+haven't been updated yet still authenticate via the previous token until
+the script retires it. See `~/.local/bin/fleet-rotate-token`.
 """
 
 from pathlib import Path
@@ -39,6 +47,11 @@ class Settings(BaseSettings):
 
     bearer_token: str = ""
     bearer_token_file: str = ""
+    # 2026-05-12: secondary token accepted alongside `bearer_token`.
+    # Set by `fleet-rotate-token` during the rotation window to the OLD
+    # token so clients still using it don't 401 while their configs are
+    # being updated. The script clears this after a successful rotation.
+    bearer_token_previous: str = ""
     graphiti_url: str = "http://192.168.119.117:30800/mcp"
     graphiti_bearer: str = ""
 

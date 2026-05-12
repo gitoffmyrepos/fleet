@@ -99,3 +99,59 @@ async def test_list_tools_endpoint(deps: MagicMock) -> None:
         assert "dispatch_subagent_cheap" in names
         assert "dispatch_subagent_inherit" in names
         assert len(names) == 17
+
+
+# ─── 2026-05-12 multi-token rotation tests ─────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_previous_token_accepted_during_rotation(deps: MagicMock) -> None:
+    """When bearer_token_previous is set (rotation window), BOTH the
+    primary and the previous token authenticate. This is the property
+    that turns a token rotation from a 16-hour incident into a no-op:
+    clients still using the old token keep working while their config
+    files are being rewritten one by one.
+    """
+    app = build_app(
+        deps=deps,
+        bearer_token="new-token",
+        bearer_token_previous="old-token",
+    )
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        # Primary works.
+        r = await c.get("/mcp/tools/list", headers={"authorization": "Bearer new-token"})
+        assert r.status_code == 200, "primary token must authenticate"
+        # Previous works during rotation.
+        r = await c.get("/mcp/tools/list", headers={"authorization": "Bearer old-token"})
+        assert r.status_code == 200, "previous token must authenticate during rotation"
+        # Genuine garbage still gets rejected.
+        r = await c.get("/mcp/tools/list", headers={"authorization": "Bearer not-a-token"})
+        assert r.status_code == 401, "unknown token must be rejected"
+
+
+@pytest.mark.asyncio
+async def test_previous_token_rejected_once_rotation_window_closes(
+    deps: MagicMock,
+) -> None:
+    """After fleet-rotate-token retires the previous token (clears
+    FLEET_BEARER_TOKEN_PREVIOUS in .env and restarts), only the primary
+    is accepted.
+    """
+    app = build_app(deps=deps, bearer_token="new-token", bearer_token_previous="")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        r = await c.get("/mcp/tools/list", headers={"authorization": "Bearer new-token"})
+        assert r.status_code == 200
+        r = await c.get("/mcp/tools/list", headers={"authorization": "Bearer old-token"})
+        assert r.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_empty_bearer_token_disables_auth_entirely(deps: MagicMock) -> None:
+    """Backward-compat: configuration without any token (e.g. local dev)
+    leaves _auth a no-op. Same posture as the pre-rotation code path.
+    """
+    app = build_app(deps=deps, bearer_token="", bearer_token_previous="")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        # No auth header at all — should still 200.
+        r = await c.get("/mcp/tools/list")
+        assert r.status_code == 200

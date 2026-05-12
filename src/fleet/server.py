@@ -60,16 +60,36 @@ class ToolCallBody(BaseModel):
     arguments: dict[str, Any] = {}
 
 
-def build_app(*, deps: Any, bearer_token: str) -> FastAPI:
+def build_app(
+    *,
+    deps: Any,
+    bearer_token: str,
+    bearer_token_previous: str = "",
+) -> FastAPI:
+    """Build the Fleet MCP FastAPI app.
+
+    Two-token auth: ``bearer_token`` is the primary; ``bearer_token_previous``
+    is honored too when set, so client configs still using the OLD token
+    keep working across a rotation. The ``fleet-rotate-token`` helper sets
+    `_previous` during a rotation window and clears it once every client
+    has been updated. See ``src/fleet/config.py`` (2026-05-12).
+    """
     app = FastAPI(title="fleet-mcp", version="0.1.0")
     tools = ToolRegistry(deps)
 
+    # Build a frozen set of acceptable tokens once at app-construction time
+    # so every request pays only a set-lookup cost (not two equality checks).
+    accepted_tokens: frozenset[str] = frozenset(
+        t for t in (bearer_token, bearer_token_previous) if t
+    )
+
     def _auth(authorization: str | None) -> None:
-        if not bearer_token:
+        if not accepted_tokens:
             return
         if not authorization or not authorization.startswith("Bearer "):
             raise HTTPException(401, "missing bearer")
-        if authorization.removeprefix("Bearer ").strip() != bearer_token:
+        presented = authorization.removeprefix("Bearer ").strip()
+        if presented not in accepted_tokens:
             raise HTTPException(401, "bad bearer")
 
     @app.get("/health")
