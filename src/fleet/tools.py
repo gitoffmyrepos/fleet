@@ -42,23 +42,23 @@ def _resolve_cwd(a: dict[str, Any]) -> str:
     """Resolve the agent working directory from MCP args.
 
     Accepts (in priority order): ``cwd``, ``workdir``, ``repo_path``.
-    Raises ``ToolError`` when none is provided — the prior FX fallback
-    was retired in 2026-05-11 (opt-1). Callers that pass the legacy FX
-    literal get a one-release DeprecationWarning so cached external
-    clients can flush their assumptions.
+    Defaults to FX repo for backward compatibility with Hermes harness.
+    Callers that need a different repo should pass cwd explicitly.
     """
     cwd = a.get("cwd") or a.get("workdir") or a.get("repo_path")
     if not cwd:
-        raise ToolError(
-            "cwd is required: pass {'cwd': '/full/path/to/repo'}. "
-            "The prior FX-by-default fallback was removed in 2026-05-11 "
-            "(opt-1) because Nova-and-other-repo work was silently landing "
-            "in FX."
+        # 2026-05-13: Restore FX default for Hermes harness compatibility.
+        cwd = _FX_LITERAL
+        warnings.warn(
+            "cwd not provided — defaulting to FX repo. Pass explicit cwd "
+            "if targeting a different repository.",
+            DeprecationWarning,
+            stacklevel=3,
         )
-    if cwd == _FX_LITERAL:
+    elif cwd == _FX_LITERAL:
         warnings.warn(
             "Passing the literal old FX default path — confirm this is "
-            "intentional; the implicit fallback was removed in opt-1.",
+            "intentional; the implicit fallback was restored in 2026-05-13.",
             DeprecationWarning,
             stacklevel=3,
         )
