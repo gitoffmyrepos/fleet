@@ -15,12 +15,16 @@ def _clear_fleet_env(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_defaults_when_no_env() -> None:
     s = Settings(_env_file=None)
     assert s.bearer_token == ""
+    # 2026-05-12 zero-downtime rotation: previous-token default is empty.
+    assert s.bearer_token_previous == ""
     assert s.graphiti_url == "http://192.168.119.117:30800/mcp"
     assert s.router_model == "claude-sonnet-4-6"
-    assert s.per_task_budget_tokens == 200_000
+    # 2026-05-12: raised from 200k → 300k for deep forensic investigations.
+    assert s.per_task_budget_tokens == 300_000
     assert s.registry_refresh_seconds == 300
     assert s.cache_ttl_seconds == 86_400
-    assert s.dispatch_timeout_seconds == 1_800
+    # 2026-05-12: raised 1800s → 3600s for hive-mind spawn with 20 agents.
+    assert s.dispatch_timeout_seconds == 3_600
 
 
 def test_env_override(monkeypatch: pytest.MonkeyPatch) -> None:
