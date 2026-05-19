@@ -1,0 +1,101 @@
+# Standalone CronJob manifest for the Fleet orphan reconciler.
+#
+# Defense-in-depth cleanup for the per-dispatch branch lifecycle. Runs
+# daily at 05:00 UTC in DRY-RUN mode so the report is always fresh for
+# operators but never destructive. To allow auto-deletion of MERGED
+# worktrees, change the args to include `--apply`; STALE worktrees
+# still require `--apply --stale-apply` and operator review.
+#
+# The CronJob image is the same Fleet container, just with a different
+# entrypoint (the `fleet-reconciler` script registered in
+# pyproject.toml). Metrics are emitted to the Prometheus facade
+# in-process — to surface them in cluster monitoring, scrape the
+# reconciler pod (a sidecar exporter or the prom-pushgateway can pick
+# them up). The simpler path is to enable the metrics endpoint on the
+# long-running Fleet service, which the reconciler increments via the
+# shared singleton when running locally.
+#
+# This is the standalone manifest (kubectl apply -f). The Helm chart
+# wraps the same definition in `templates/cronjob-reconciler.yaml`
+# guarded by `.Values.reconciler.enabled`.
+#
+# Apply with:
+#   kubectl -n memory-stack apply -f deploy/cronjob-reconciler.yaml
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: fleet-reconciler
+  namespace: memory-stack
+  labels:
+    app.kubernetes.io/name: fleet
+    app.kubernetes.io/component: reconciler
+spec:
+  # 05:00 UTC daily — well outside business hours for the homelab.
+  schedule: "0 5 * * *"
+  timeZone: UTC
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 5
+  startingDeadlineSeconds: 600
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      activeDeadlineSeconds: 1800
+      ttlSecondsAfterFinished: 86400
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/name: fleet
+            app.kubernetes.io/component: reconciler
+        spec:
+          restartPolicy: Never
+          # NOTE: Fleet needs to reach the worktree mounts to inspect
+          # them. In the homelab cluster Fleet runs on the host today,
+          # so this CronJob is primarily a SAFETY NET that fires
+          # against an in-cluster mirror of the state file. Set
+          # FLEET_RECONCILER_REPOS to an empty string or hostPath mount
+          # the host's /tmp/fleet-worktrees if you need on-cluster
+          # cleanup.
+          containers:
+            - name: reconciler
+              image: harbor.strategybase.local/fleet/fleet:0.1.0
+              imagePullPolicy: IfNotPresent
+              # Override the default `python -m fleet` entrypoint to
+              # run the reconciler instead. The fleet-reconciler script
+              # is installed via pyproject.toml [project.scripts].
+              command:
+                - fleet-reconciler
+              args:
+                - --report-path
+                - /var/log/fleet/reconciler-report.json
+                # Add --apply once the operator is comfortable letting
+                # MERGED worktrees be deleted automatically. Default
+                # baseline is dry-run: surface the data, let an
+                # operator hit it.
+              env:
+                - name: FLEET_RECONCILER_REPOS
+                  value: "/var/lib/fleet/worktrees-fx:/var/lib/fleet/worktrees-gitops"
+                - name: FLEET_RECONCILER_STATE_FILE
+                  value: "/var/lib/fleet/state/active_dispatches.json"
+                - name: FLEET_RECONCILER_LOG_LEVEL
+                  value: "INFO"
+              resources:
+                requests:
+                  cpu: 50m
+                  memory: 64Mi
+                limits:
+                  cpu: 500m
+                  memory: 256Mi
+              volumeMounts:
+                - name: report-output
+                  mountPath: /var/log/fleet
+                - name: fleet-state
+                  mountPath: /var/lib/fleet/state
+                  readOnly: true
+          volumes:
+            - name: report-output
+              emptyDir: {}
+            - name: fleet-state
+              persistentVolumeClaim:
+                claimName: fleet-state
+                readOnly: true

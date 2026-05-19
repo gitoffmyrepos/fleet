@@ -1,0 +1,74 @@
+{{- if .Values.reconciler.enabled }}
+# Helm-managed CronJob for the Fleet orphan reconciler.
+# Defense-in-depth cleanup. See deploy/cronjob-reconciler.yaml for
+# the standalone (non-Helm) equivalent.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ include "fleet.name" . }}-reconciler
+  labels:
+    {{- include "fleet.labels" . | nindent 4 }}
+    app.kubernetes.io/component: reconciler
+spec:
+  schedule: {{ .Values.reconciler.schedule | quote }}
+  timeZone: {{ .Values.reconciler.timeZone | default "UTC" | quote }}
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: {{ .Values.reconciler.successfulJobsHistoryLimit | default 3 }}
+  failedJobsHistoryLimit: {{ .Values.reconciler.failedJobsHistoryLimit | default 5 }}
+  startingDeadlineSeconds: 600
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      activeDeadlineSeconds: {{ .Values.reconciler.activeDeadlineSeconds | default 1800 }}
+      ttlSecondsAfterFinished: 86400
+      template:
+        metadata:
+          labels:
+            {{- include "fleet.labels" . | nindent 12 }}
+            app.kubernetes.io/component: reconciler
+        spec:
+          restartPolicy: Never
+          containers:
+            - name: reconciler
+              image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+              imagePullPolicy: {{ .Values.image.pullPolicy }}
+              command:
+                - fleet-reconciler
+              args:
+                - --report-path
+                - /var/log/fleet/reconciler-report.json
+                {{- if .Values.reconciler.apply }}
+                - --apply
+                {{- end }}
+                {{- if .Values.reconciler.staleApply }}
+                - --stale-apply
+                {{- end }}
+                - --stale-days
+                - {{ .Values.reconciler.staleDays | default 7 | quote }}
+              env:
+                - name: FLEET_RECONCILER_REPOS
+                  value: {{ .Values.reconciler.repos | quote }}
+                - name: FLEET_RECONCILER_STATE_FILE
+                  value: {{ .Values.reconciler.stateFile | quote }}
+                - name: FLEET_RECONCILER_LOG_LEVEL
+                  value: {{ .Values.reconciler.logLevel | default "INFO" | quote }}
+              resources:
+                {{- toYaml .Values.reconciler.resources | nindent 16 }}
+              volumeMounts:
+                - name: report-output
+                  mountPath: /var/log/fleet
+                {{- if .Values.reconciler.statePvcName }}
+                - name: fleet-state
+                  mountPath: {{ .Values.reconciler.stateMountPath | default "/var/lib/fleet/state" }}
+                  readOnly: true
+                {{- end }}
+          volumes:
+            - name: report-output
+              emptyDir: {}
+            {{- if .Values.reconciler.statePvcName }}
+            - name: fleet-state
+              persistentVolumeClaim:
+                claimName: {{ .Values.reconciler.statePvcName }}
+                readOnly: true
+            {{- end }}
+{{- end }}

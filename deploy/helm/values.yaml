@@ -44,3 +44,37 @@ networkPolicy:
     - memory-stack
     - default
     - openclaw
+
+# A2 defense-in-depth: daily orphan reconciler. Default to dry-run so
+# the report is fresh every morning but nothing destructive happens
+# without explicit operator opt-in.
+reconciler:
+  enabled: true
+  schedule: "0 5 * * *"   # 5 AM UTC
+  timeZone: "UTC"
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 5
+  activeDeadlineSeconds: 1800
+  # apply=false → dry-run report only. Flip to true once operator has
+  # reviewed a few days of reports and is confident MERGED deletions
+  # are safe.
+  apply: false
+  staleApply: false
+  staleDays: 7
+  logLevel: "INFO"
+  # Colon-separated list of repos to scan inside the pod. Override per
+  # cluster — these defaults match the host-mode homelab layout where
+  # the reconciler runs against the host paths.
+  repos: "/home/kelvin/SB-HomeLAb/FX:/home/kelvin/SB-HomeLAb/sb-gitops:/home/kelvin/SB-HomeLAb/sb-dev-infra"
+  stateFile: "/home/kelvin/.local/state/fleet/active_dispatches.json"
+  # Set to a PVC name to mount A1's state file into the pod (the file
+  # lives on the host today; this is the in-cluster path).
+  statePvcName: ""
+  stateMountPath: "/var/lib/fleet/state"
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi

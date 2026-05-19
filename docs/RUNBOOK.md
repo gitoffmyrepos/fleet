@@ -75,7 +75,105 @@ mcp__fleet__circuit_close({"name": "ruflo"})
 - Health: `curl http://192.168.119.117:30801/health`
 - Dashboard: `http://192.168.119.117:30801/dashboard`
 - Metrics JSON: `http://192.168.119.117:30801/dashboard/metrics.json`
+- Prometheus metrics: `curl http://192.168.119.117:30801/metrics`
 - Logs: `kubectl -n memory-stack logs deploy/fleet -f`
+
+### Prometheus metrics (2026-05-19, A2)
+
+The `/metrics` endpoint exposes:
+
+| Metric | Type | Labels | Notes |
+|---|---|---|---|
+| `fleet_dispatches_total` | counter | `kind` | per-kind dispatch counter |
+| `fleet_dispatches_succeeded_total` | counter | — | `ok=True` dispatches |
+| `fleet_dispatches_failed_total` | counter | `reason` | failure reason taxonomy |
+| `fleet_branches_created_total` | counter | — | per-dispatch branches created |
+| `fleet_branches_merged_total` | counter | — | branches merged back to master |
+| `fleet_branches_orphaned_total` | counter | — | orphans found by the reconciler |
+| `fleet_worktrees_active` | gauge | — | current Fleet-managed worktree count |
+| `fleet_dispatch_duration_seconds` | histogram | `kind` | end-to-end wall-clock |
+
+If `prometheus_client` is missing the endpoint returns a single-line
+`# fleet metrics disabled` comment instead of failing — the rest of the
+service stays up.
+
+## Orphan cleanup (2026-05-19, A2)
+
+Per-dispatch teardown (Agent A1) handles the happy path. The reconciler
+is the safety net for everything else — crashes, kills, network glitches
+that left a worktree+branch dangling.
+
+### Run on demand
+
+```bash
+# Dry-run (default). Writes /tmp/fleet-reconciler-report.json.
+fleet-reconciler
+
+# Actually delete MERGED worktrees.
+fleet-reconciler --apply
+
+# Also delete STALE (>7d) worktrees. ALWAYS review the dry-run report first.
+fleet-reconciler --apply --stale-apply
+
+# Custom repos / threshold:
+fleet-reconciler --repo /path/to/repo --stale-days 14
+```
+
+Environment variables (override defaults):
+
+- `FLEET_RECONCILER_REPOS` — colon-separated repo list. Defaults to
+  FX + sb-gitops + sb-dev-infra.
+- `FLEET_RECONCILER_STATE_FILE` — Agent A1's active-dispatches state file.
+  Default `~/.local/state/fleet/active_dispatches.json`.
+- `FLEET_RECONCILER_REPORT_PATH` — Default `/tmp/fleet-reconciler-report.json`.
+
+### Verdict taxonomy
+
+Each Fleet-managed worktree is classified into one of four verdicts:
+
+| Verdict | Action (`--apply`) | Action (`--apply --stale-apply`) |
+|---|---|---|
+| `active` (in state file) | skipped | skipped |
+| `merged` (ancestor of `origin/master`) | deleted | deleted |
+| `stale` (last commit ≥7d, not merged) | none | deleted |
+| `unknown` (detached / can't determine) | skipped | skipped |
+
+The reconciler is **fail-safe**: any state it can't determine is left
+alone. The dry-run report flags STALE and UNKNOWN rows so an operator
+can investigate before opting into deletion.
+
+### What to look for in the report
+
+The JSON report at `/tmp/fleet-reconciler-report.json` (or the
+`--report-path` override) carries:
+
+- `state_file_present` — `false` here means A1's lifecycle never ran
+  or the state file got wiped; without it the reconciler can't tell
+  ACTIVE worktrees apart from orphans. Investigate before passing
+  `--apply`.
+- `summary.errors` — non-zero means git operations failed during
+  cleanup. Check `worktrees[].error` for the offending paths.
+- `summary.unknown` — worktrees the reconciler refused to classify
+  (detached HEAD, no master ref, etc.). Manual review needed; these
+  are NEVER deleted automatically.
+
+### Daily CronJob
+
+The Helm chart includes a daily CronJob at 05:00 UTC running in
+dry-run mode. Enable / configure via:
+
+```yaml
+# values.yaml
+reconciler:
+  enabled: true
+  schedule: "0 5 * * *"
+  apply: false          # set true to delete MERGED orphans
+  staleApply: false     # set true to also delete STALE orphans
+  staleDays: 7
+```
+
+A standalone manifest (no Helm) lives at
+[`deploy/cronjob-reconciler.yaml`](../deploy/cronjob-reconciler.yaml).
 
 ## Upstream installations on the cluster pod
 

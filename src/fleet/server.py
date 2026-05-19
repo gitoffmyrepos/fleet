@@ -4,9 +4,10 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import FastAPI, Header, HTTPException
+from fastapi import FastAPI, Header, HTTPException, Response
 from pydantic import BaseModel
 
+from . import metrics as _metrics_mod
 from .tools import ToolError, ToolRegistry
 
 _TOOL_DESCRIPTIONS: dict[str, str] = {
@@ -76,6 +77,14 @@ def build_app(
     """
     app = FastAPI(title="fleet-mcp", version="0.1.0")
     tools = ToolRegistry(deps)
+
+    # ── Prometheus metrics (A2 deliverable 2026-05-19) ─────────────────
+    # A2-only territory; A1 does NOT touch this block. Reach for
+    # ``fleet.metrics.get()`` from instrumentation call sites — the
+    # facade auto-falls-back to no-op shims when prometheus_client is
+    # absent so the app stays usable in dev.
+    fleet_metrics = _metrics_mod.FleetMetrics()
+    _metrics_mod.set_facade(fleet_metrics)
 
     # Build a frozen set of acceptable tokens once at app-construction time
     # so every request pays only a set-lookup cost (not two equality checks).
@@ -189,5 +198,14 @@ def build_app(
     @app.get("/dashboard/metrics.json")
     async def dashboard_metrics() -> dict[str, Any]:
         return await metrics_json(deps=deps)
+
+    # ── /metrics — Prometheus scrape endpoint (A2) ─────────────────────
+    # Unauthenticated by design: standard ServiceMonitor + NetworkPolicy
+    # restrict access to the prometheus pod. If you re-expose this
+    # outside the cluster, add `_auth(authorization)` here.
+    @app.get("/metrics")
+    async def prometheus_metrics() -> Response:
+        content_type, payload = _metrics_mod.render_metrics()
+        return Response(content=payload, media_type=content_type)
 
     return app

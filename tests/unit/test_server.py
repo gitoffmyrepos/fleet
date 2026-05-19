@@ -155,3 +155,25 @@ async def test_empty_bearer_token_disables_auth_entirely(deps: MagicMock) -> Non
         # No auth header at all — should still 200.
         r = await c.get("/mcp/tools/list")
         assert r.status_code == 200
+
+
+# ─── 2026-05-19 A2: /metrics endpoint ───────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_metrics_endpoint_returns_200(deps: MagicMock) -> None:
+    """/metrics is reachable without auth and returns Prometheus text."""
+    app = build_app(deps=deps, bearer_token="tok")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        r = await c.get("/metrics")
+        assert r.status_code == 200
+        # Either real prometheus text or the disabled-shim comment.
+        assert r.headers["content-type"].startswith("text/plain")
+        # When prometheus_client is installed (CI default), at least one
+        # of our metrics should appear in the output as a help/type line.
+        try:
+            import prometheus_client  # noqa: F401
+
+            assert "fleet_dispatches_total" in r.text or "fleet_worktrees_active" in r.text
+        except ImportError:
+            assert "disabled" in r.text

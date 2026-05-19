@@ -13,7 +13,11 @@ dependencies = [
     "pydantic-settings>=2.5",
     "structlog>=24.4",
     "jinja2>=3.1",
+    "prometheus-client>=0.20",
 ]
+
+[project.scripts]
+fleet-reconciler = "fleet.reconciler:main"
 
 [project.optional-dependencies]
 dev = [
@@ -37,6 +41,7 @@ packages = ["src/fleet"]
 testpaths = ["tests"]
 asyncio_mode = "auto"
 markers = [
+    "unit: hermetic unit test (default)",
     "integration: requires docker compose stack",
     "e2e: requires running fleet-mcp + claude/goose/openclaw",
 ]
