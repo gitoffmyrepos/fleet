@@ -231,8 +231,10 @@ async def test_worktree_isolation_creates_separate_tree(
     from pathlib import Path as _P
 
     assert not (_P(repo) / "marker.txt").exists()
-    # Persistence note must reflect the worktree push.
-    assert "worktree branch" in result.persistence_note
+    # 2026-05-19: persistence note now reflects rebase + master push +
+    # remote feature-branch delete (the new lifecycle).
+    assert "rebased onto origin/master" in result.persistence_note
+    assert "fleet/t_iso_create" in result.persistence_note
     assert result.commit_sha is not None
 
 
@@ -284,31 +286,34 @@ async def test_worktree_parallel_dispatches_do_not_cross_contaminate(
     )
     assert ra.ok and rb.ok
 
-    # Local branches are cleaned up after push; query the bare remote
-    # directly to verify the pushed branches have disjoint trees.
+    # 2026-05-19 (new lifecycle): the feature branches are deleted from
+    # origin after a successful master push. Inspect origin/master itself
+    # — BOTH disjoint files must have landed there via two sequential
+    # rebase+push operations (the second one rebased onto the first).
     import subprocess
     from pathlib import Path as _P
 
     remote_dir = str(_P(repo).parent / "remote.git")
     out = subprocess.run(
-        ["git", "--git-dir", remote_dir, "ls-tree", "-r", "--name-only", "fleet/t_par_a"],
+        ["git", "--git-dir", remote_dir, "ls-tree", "-r", "--name-only", "master"],
         capture_output=True,
         text=True,
         check=False,
     )
-    a_files = set(out.stdout.split())
+    master_files = set(out.stdout.split())
+    # Both files must be on master; that's only possible if the second
+    # dispatch rebased on top of the first (the race-fix guarantee).
+    assert "only-A.txt" in master_files
+    assert "only-B.txt" in master_files
+
+    # The fleet/* feature branches must have been deleted from origin.
     out = subprocess.run(
-        ["git", "--git-dir", remote_dir, "ls-tree", "-r", "--name-only", "fleet/t_par_b"],
+        ["git", "--git-dir", remote_dir, "branch", "--list", "fleet/*"],
         capture_output=True,
         text=True,
         check=False,
     )
-    b_files = set(out.stdout.split())
-    # only-A.txt must be in A's branch and NOT in B's branch (the race fix).
-    assert "only-A.txt" in a_files
-    assert "only-A.txt" not in b_files
-    assert "only-B.txt" in b_files
-    assert "only-B.txt" not in a_files
+    assert out.stdout.strip() == "", f"orphan fleet branches remain on origin: {out.stdout!r}"
 
 
 @pytest.mark.asyncio

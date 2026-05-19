@@ -15,6 +15,7 @@ from typing import Any, ClassVar
 
 from ..circuit import CircuitOpen, CircuitRegistry
 from ..telemetry import Telemetry
+from .state import ActiveDispatch, record_dispatch, remove_dispatch
 
 logger = logging.getLogger(__name__)
 
@@ -153,10 +154,23 @@ class DispatcherBase(abc.ABC):
                     task_id,
                     wt_err,
                 )
-            else:
+            elif wt_path and wt_branch:
                 cwd = wt_path
                 worktree_path = wt_path
                 worktree_branch = wt_branch
+                # 2026-05-19 (lifecycle state): record the active dispatch so
+                # an orchestrator crash leaves a recoverable trail.
+                record_dispatch(
+                    ActiveDispatch(
+                        task_id=task_id,
+                        upstream_name=self.upstream_name,
+                        source_repo=original_cwd or wt_path,
+                        worktree_path=wt_path,
+                        worktree_branch=wt_branch,
+                        started_at=time.time(),
+                        extra={"timeout_seconds": self._timeout},
+                    )
+                )
 
         # If we redirected cwd to a worktree, propagate to BOTH `cwd` and
         # `workdir` kwargs (the swarm dispatcher uses `workdir` for
@@ -252,10 +266,29 @@ class DispatcherBase(abc.ABC):
                 if proc.stderr:
                     proc.stderr.feed_eof()
             breaker.record_failure()
+            # 2026-05-19 (lifecycle): KEEP the worktree on timeout so the
+            # operator can inspect what the agent had written. Without
+            # this, forensics on long-running agent failures was impossible.
+            forensic_note = ""
+            if worktree_path:
+                forensic_note = (
+                    f"timeout — worktree retained for forensics at {worktree_path} "
+                    f"(branch {worktree_branch}). Clean up manually with: "
+                    f"git -C {original_cwd or worktree_path} worktree remove --force "
+                    f"{worktree_path} && git -C {original_cwd or worktree_path} branch -D "
+                    f"{worktree_branch}"
+                )
+                logger.warning("dispatch %s: %s", task_id, forensic_note)
             await self._t.failure(
                 task_id=task_id,
                 reason="timeout",
-                body={"timeout_seconds": self._timeout},
+                body={
+                    "timeout_seconds": self._timeout,
+                    "worktree_retained": bool(worktree_path),
+                    "worktree_path": worktree_path,
+                    "worktree_branch": worktree_branch,
+                    "forensic_note": forensic_note,
+                },
             )
             return DispatchResult(
                 ok=False,
@@ -265,6 +298,10 @@ class DispatcherBase(abc.ABC):
                 duration_seconds=time.monotonic() - t0,
                 # Partial output already streamed to disk — operator can recover it.
                 log_path=str(stdout_log) if stdout_log else None,
+                # Surface the retained worktree so callers know where to look.
+                worktree_path=worktree_path,
+                worktree_branch=worktree_branch,
+                persistence_note=forensic_note,
             )
 
         stdout_b = bytes(stdout_acc)
@@ -274,18 +311,31 @@ class DispatcherBase(abc.ABC):
         if proc.returncode != 0:
             breaker.record_failure()
             err = f"exit code {proc.returncode}: {stderr[-200:]}"
+            # 2026-05-19 (lifecycle): KEEP the worktree on non-zero exit so the
+            # operator can inspect partial work. The previous behaviour
+            # silently removed the evidence right when the human needed it.
+            forensic_note = ""
+            if worktree_path:
+                forensic_note = (
+                    f"non-zero exit ({proc.returncode}) — worktree retained at "
+                    f"{worktree_path} (branch {worktree_branch}). Clean up manually with: "
+                    f"git -C {original_cwd or worktree_path} worktree remove --force "
+                    f"{worktree_path} && git -C {original_cwd or worktree_path} branch -D "
+                    f"{worktree_branch}"
+                )
+                logger.warning("dispatch %s: %s", task_id, forensic_note)
             await self._t.failure(
                 task_id=task_id,
                 reason=f"exit_code_{proc.returncode}",
-                body={"exit_code": proc.returncode, "stderr_tail": stderr[-200:]},
+                body={
+                    "exit_code": proc.returncode,
+                    "stderr_tail": stderr[-200:],
+                    "worktree_retained": bool(worktree_path),
+                    "worktree_path": worktree_path,
+                    "worktree_branch": worktree_branch,
+                    "forensic_note": forensic_note,
+                },
             )
-            # Tear down worktree on failure (no commits, no merge).
-            if worktree_path:
-                await self._remove_worktree(
-                    source_repo=original_cwd or worktree_path,
-                    worktree_path=worktree_path,
-                    branch=worktree_branch,
-                )
             return DispatchResult(
                 ok=False,
                 task_id=task_id,
@@ -294,8 +344,10 @@ class DispatcherBase(abc.ABC):
                 error=err,
                 exit_code=proc.returncode,
                 duration_seconds=time.monotonic() - t0,
-                worktree_path=None,
-                worktree_branch=None,
+                # 2026-05-19: surface the retained worktree (was None previously).
+                worktree_path=worktree_path,
+                worktree_branch=worktree_branch,
+                persistence_note=forensic_note,
             )
 
         breaker.record_success()
@@ -367,9 +419,20 @@ class DispatcherBase(abc.ABC):
                     source_repo=original_cwd or worktree_path,
                     worktree_path=worktree_path,
                     branch=worktree_branch,
+                    task_id=task_id,
                 )
                 wt_path_for_result = None
                 wt_branch_for_result = None
+            else:
+                # Worktree retained (hallucination or no-commit) — leave the
+                # state entry on disk so a restart sees it for reconciliation.
+                logger.info(
+                    "dispatch %s: worktree retained at %s (branch %s) "
+                    "for operator inspection; state entry kept",
+                    task_id,
+                    worktree_path,
+                    worktree_branch,
+                )
 
         await self._t.end(
             task_id=task_id,
@@ -461,56 +524,12 @@ class DispatcherBase(abc.ABC):
         rc, sha, _ = await self._git(repo_top, ["rev-parse", "HEAD"])
         commit_sha = sha.strip() if rc == 0 else None
 
-        # 5. Push.
+        # 5. Push — worktree branch lifecycle (2026-05-19 redesign).
         if worktree_branch:
-            # Worktree path: push the feature branch + try to fast-forward
-            # origin/master so the work lands without manual PR step.
-            rc, _, err = await self._git(
-                repo_top, ["push", "origin", f"HEAD:refs/heads/{worktree_branch}"]
-            )
-            if rc != 0:
-                return (
-                    commit_sha,
-                    False,
-                    (
-                        f"committed locally on {worktree_branch}; push branch failed: "
-                        f"{err.strip()[:200]}"
-                    ),
-                )
-            # Fetch master ref to see if our commit fast-forwards from it.
-            await self._git(repo_top, ["fetch", "origin", "master"])
-            rc, base_sha, _ = await self._git(repo_top, ["merge-base", "HEAD", "origin/master"])
-            rc2, master_sha, _ = await self._git(repo_top, ["rev-parse", "origin/master"])
-            ff_eligible = rc == 0 and rc2 == 0 and base_sha.strip() == master_sha.strip()
-            if ff_eligible:
-                rc, _, err = await self._git(repo_top, ["push", "origin", "HEAD:refs/heads/master"])
-                if rc == 0:
-                    return (
-                        commit_sha,
-                        True,
-                        (
-                            f"committed on worktree branch {worktree_branch}; "
-                            f"fast-forwarded origin/master"
-                        ),
-                    )
-                # FF push failed (someone else pushed concurrently). The
-                # feature branch is still on origin — operator can merge it.
-                return (
-                    commit_sha,
-                    True,
-                    (
-                        f"committed on worktree branch {worktree_branch}; "
-                        f"master FF push lost a race ({err.strip()[:120]}) — "
-                        f"merge {worktree_branch} manually."
-                    ),
-                )
-            return (
-                commit_sha,
-                True,
-                (
-                    f"committed on worktree branch {worktree_branch}; "
-                    f"diverged from origin/master, not auto-merging."
-                ),
+            return await self._land_worktree_on_master(
+                repo_top=repo_top,
+                worktree_branch=worktree_branch,
+                commit_sha=commit_sha,
             )
 
         # Non-worktree path (back-compat): push current branch to origin.
@@ -520,20 +539,181 @@ class DispatcherBase(abc.ABC):
 
         return commit_sha, True, "committed and pushed"
 
+    async def _land_worktree_on_master(
+        self,
+        *,
+        repo_top: str,
+        worktree_branch: str,
+        commit_sha: str | None,
+    ) -> tuple[str | None, bool, str]:
+        """Rebase the worktree branch onto origin/master and push to master.
+
+        2026-05-19 (branch lifecycle): replaces the prior FF-only path. The
+        flow is:
+
+          1. ``git fetch origin master`` — get the latest tip.
+          2. ``git rebase origin/master`` — replay our commit on top of the
+             current remote. Handles the race where origin/master moved
+             during the agent's work.
+          3. If the rebase succeeded cleanly:
+             a. ``git push origin HEAD:refs/heads/master`` (master-only
+                flow per ``feedback_master_only.md``).
+             b. If master push succeeded, ``git push --delete`` the remote
+                feature branch — we don't want orphan ``fleet/task_*``
+                branches piling up on origin.
+          4. If the rebase had conflicts: abort the rebase and keep the
+             branch (push as feature branch only) so the operator can
+             resolve manually. Returns ``pushed=True`` because the work
+             is preserved on origin even if master didn't move.
+
+        Always returns ``(commit_sha, pushed, note)``. Never raises —
+        commit/push is best-effort; the agent's work is already on disk.
+        """
+        # 1. Refresh origin/master.
+        rc, _, err = await self._git(repo_top, ["fetch", "origin", "master"])
+        if rc != 0:
+            # Without origin/master we can't rebase. Push the feature branch
+            # so work isn't lost and the operator can recover.
+            return await self._push_feature_branch_only(
+                repo_top=repo_top,
+                worktree_branch=worktree_branch,
+                commit_sha=commit_sha,
+                note_prefix=f"fetch origin master failed ({err.strip()[:120]})",
+            )
+
+        # 2. Rebase onto origin/master so we're up to date.
+        rc, _, err = await self._git(repo_top, ["rebase", "origin/master"])
+        if rc != 0:
+            # Conflict — abort the rebase to leave the worktree in a clean
+            # state, then push the feature branch so work isn't lost.
+            await self._git(repo_top, ["rebase", "--abort"])
+            logger.warning(
+                "rebase of %s onto origin/master failed; pushing feature branch only: %s",
+                worktree_branch,
+                err.strip()[:200],
+            )
+            return await self._push_feature_branch_only(
+                repo_top=repo_top,
+                worktree_branch=worktree_branch,
+                commit_sha=commit_sha,
+                note_prefix=(
+                    f"rebase onto origin/master conflicted ({err.strip()[:120]}); "
+                    f"branch retained for manual merge"
+                ),
+            )
+
+        # Rebase advanced HEAD — refresh the commit SHA we'll report.
+        rc, new_head, _ = await self._git(repo_top, ["rev-parse", "HEAD"])
+        if rc == 0 and new_head.strip():
+            commit_sha = new_head.strip()
+
+        # 3a. Push rebased HEAD to master. Race-safe: another worker may
+        #     have pushed in the tiny window between our fetch and push,
+        #     so re-fetch + retry once on rejection.
+        rc, _, err = await self._git(repo_top, ["push", "origin", "HEAD:refs/heads/master"])
+        if rc != 0:
+            # Retry-once after re-fetch + re-rebase.
+            await self._git(repo_top, ["fetch", "origin", "master"])
+            retry_rc, _, retry_err = await self._git(repo_top, ["rebase", "origin/master"])
+            if retry_rc != 0:
+                await self._git(repo_top, ["rebase", "--abort"])
+                return await self._push_feature_branch_only(
+                    repo_top=repo_top,
+                    worktree_branch=worktree_branch,
+                    commit_sha=commit_sha,
+                    note_prefix=(
+                        f"master push lost the race AND re-rebase conflicted "
+                        f"({retry_err.strip()[:120]}); branch retained"
+                    ),
+                )
+            rc2, new_head2, _ = await self._git(repo_top, ["rev-parse", "HEAD"])
+            if rc2 == 0 and new_head2.strip():
+                commit_sha = new_head2.strip()
+            rc, _, err = await self._git(repo_top, ["push", "origin", "HEAD:refs/heads/master"])
+            if rc != 0:
+                return await self._push_feature_branch_only(
+                    repo_top=repo_top,
+                    worktree_branch=worktree_branch,
+                    commit_sha=commit_sha,
+                    note_prefix=(f"master push failed after retry ({err.strip()[:120]})"),
+                )
+
+        # 3b. Master push succeeded — delete the local + remote feature
+        #     branch. The local branch is removed by _remove_worktree
+        #     later; here we delete the remote ref so origin doesn't
+        #     accumulate orphan fleet/task_* branches.
+        del_rc, _, del_err = await self._git(
+            repo_top, ["push", "origin", "--delete", worktree_branch]
+        )
+        # Remote-delete failing is non-fatal — branch may have been pushed
+        # then never created (rebase ate the diff), or already removed by
+        # an admin sweep. Log + carry on.
+        if del_rc != 0:
+            logger.debug(
+                "could not delete remote branch origin/%s (non-fatal): %s",
+                worktree_branch,
+                del_err.strip()[:200],
+            )
+
+        return (
+            commit_sha,
+            True,
+            f"rebased onto origin/master and pushed; remote {worktree_branch} deleted",
+        )
+
+    async def _push_feature_branch_only(
+        self,
+        *,
+        repo_top: str,
+        worktree_branch: str,
+        commit_sha: str | None,
+        note_prefix: str,
+    ) -> tuple[str | None, bool, str]:
+        """Fallback: push the worktree branch as a feature branch only.
+
+        Used when rebase-onto-master is impossible (fetch failed, conflict,
+        race lost twice). The work is preserved on origin so an operator
+        can resolve + merge manually. The local + remote feature branch
+        is retained — caller will leave the worktree intact too.
+        """
+        rc, _, err = await self._git(
+            repo_top, ["push", "origin", f"HEAD:refs/heads/{worktree_branch}"]
+        )
+        if rc != 0:
+            return (
+                commit_sha,
+                False,
+                f"{note_prefix}; push of feature branch ALSO failed: {err.strip()[:200]}",
+            )
+        return (
+            commit_sha,
+            True,
+            f"{note_prefix}; feature branch {worktree_branch} pushed to origin",
+        )
+
     # --------- worktree isolation helpers ----------
 
     async def _make_worktree(
         self, *, source_repo: str, task_id: str
     ) -> tuple[str | None, str | None, str | None]:
-        """Create an isolated git worktree off source_repo's HEAD.
+        """Create an isolated git worktree off ``origin/master``.
 
-        Returns (worktree_path, branch_name, error). On failure all three
-        are (None, None, error_message) — callers should fall back to
+        Returns ``(worktree_path, branch_name, error)``. On failure all three
+        are ``(None, None, error_message)`` — callers should fall back to
         shared cwd with a warning.
 
-        Worktrees live under /tmp/fleet-worktrees/<task_id>/ to keep the
+        Worktrees live under ``/tmp/fleet-worktrees/<task_id>/`` to keep the
         source repo's tree free of fleet bookkeeping dirs (which would
-        otherwise show up in `git status` and confuse human operators).
+        otherwise show up in ``git status`` and confuse human operators).
+
+        2026-05-19 (branch lifecycle): branch the worktree off
+        ``origin/master`` rather than the source repo's local HEAD. The
+        local HEAD can be stale (operator switched branches, ran a
+        rebase, etc.); by fetching first and basing the worktree on the
+        remote tip we guarantee every dispatch starts from a consistent,
+        up-to-date master. The branch name is deterministic
+        (``fleet/task_<id>``, NOT a random suffix) so a crash leaves a
+        recoverable artefact rather than an opaque dangling ref.
         """
         # Verify source is a git repo
         rc, top, _ = await self._git(source_repo, ["rev-parse", "--show-toplevel"])
@@ -541,7 +721,31 @@ class DispatcherBase(abc.ABC):
             return None, None, "source is not a git repo"
         repo_top = top.strip()
 
-        # Worktree path + branch name
+        # 2026-05-19: refresh origin/master so the worktree starts at the
+        # latest remote tip. Non-fatal — if the fetch fails (no network,
+        # no remote, etc.) we fall back to local HEAD with a logged note.
+        base_ref = "HEAD"
+        fetch_rc, _, fetch_err = await self._git(repo_top, ["fetch", "origin", "master"])
+        if fetch_rc == 0:
+            # Confirm origin/master is now a resolvable ref before using it
+            # as the worktree base. Some repos use 'main'; fall back to HEAD
+            # if origin/master doesn't exist.
+            check_rc, _, _ = await self._git(repo_top, ["rev-parse", "--verify", "origin/master"])
+            if check_rc == 0:
+                base_ref = "origin/master"
+            else:
+                logger.debug(
+                    "origin/master not present in %s; basing fleet worktree on HEAD",
+                    repo_top,
+                )
+        else:
+            logger.debug(
+                "fetch origin master failed in %s: %s; basing fleet worktree on HEAD",
+                repo_top,
+                fetch_err.strip()[:200],
+            )
+
+        # Worktree path + branch name (deterministic, NOT random suffix)
         wt_root = Path("/tmp/fleet-worktrees")
         wt_root.mkdir(parents=True, exist_ok=True)
         wt_path = str(wt_root / task_id)
@@ -556,17 +760,21 @@ class DispatcherBase(abc.ABC):
                 shutil.rmtree(wt_path, ignore_errors=True)
         branch = f"fleet/{task_id}"
 
-        # Create branch + worktree in one shot
-        rc, _, err = await self._git(repo_top, ["worktree", "add", "-b", branch, wt_path, "HEAD"])
+        # If the local branch already exists (re-dispatch of same task_id
+        # after a previous crash), nuke it so the new worktree starts
+        # cleanly from origin/master rather than carrying stale commits.
+        await self._git(repo_top, ["branch", "-D", branch])
+
+        # Create branch + worktree in one shot, based on origin/master.
+        rc, _, err = await self._git(repo_top, ["worktree", "add", "-b", branch, wt_path, base_ref])
         if rc != 0:
-            # Branch may already exist (re-dispatch of same task_id) — try
-            # without -b
+            # Last-resort fallback: try without explicit base (uses HEAD).
             rc2, _, err2 = await self._git(repo_top, ["worktree", "add", wt_path, branch])
             if rc2 != 0:
                 return (
                     None,
                     None,
-                    (f"git worktree add failed: {err.strip()[:200]} / " f"{err2.strip()[:200]}"),
+                    (f"git worktree add failed: {err.strip()[:200]} / {err2.strip()[:200]}"),
                 )
         return wt_path, branch, None
 
@@ -576,8 +784,15 @@ class DispatcherBase(abc.ABC):
         source_repo: str,
         worktree_path: str,
         branch: str | None,
+        task_id: str | None = None,
     ) -> None:
-        """Tear down a worktree + its branch. Best-effort, never raises."""
+        """Tear down a worktree + its branch. Best-effort, never raises.
+
+        2026-05-19 (lifecycle): also removes the matching entry from the
+        active-dispatches state file. Pass ``task_id`` to scope the
+        removal — without it we leave the state entry alone (defensive
+        default for legacy callers).
+        """
         try:
             rc, top, _ = await self._git(source_repo, ["rev-parse", "--show-toplevel"])
             repo_top = top.strip() if rc == 0 else source_repo
@@ -593,6 +808,9 @@ class DispatcherBase(abc.ABC):
                 shutil.rmtree(worktree_path, ignore_errors=True)
         except Exception as e:
             logger.debug("worktree teardown error (non-fatal): %s", e)
+        finally:
+            if task_id:
+                remove_dispatch(task_id)
 
     @classmethod
     async def _capture_head_sha(cls, cwd: str | None) -> str | None:
