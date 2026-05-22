@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import logging
 import uuid
 import warnings
 from dataclasses import asdict
@@ -9,9 +11,39 @@ from typing import Any
 
 from .cache import task_hash
 
+logger = logging.getLogger(__name__)
+
 
 class ToolError(RuntimeError):
     """Raised when a requested tool name is unknown."""
+
+
+async def _supervise_background_dispatch(
+    coro,
+    *,
+    task_id: str,
+    telemetry,
+    label: str,
+) -> None:
+    """Run a backgrounded dispatch coroutine and ensure failures are logged.
+
+    asyncio.create_task swallows unhandled exceptions silently — this
+    supervisor wraps the dispatch coro so any unhandled error is emitted
+    as a fleet_dispatch_failed telemetry event AND a server log line, so
+    operators polling mcp__fleet__status can see the failure.
+    """
+    try:
+        await coro
+    except Exception as exc:
+        logger.exception("background dispatch %s (task=%s) failed", label, task_id)
+        try:
+            await telemetry.failure(
+                task_id=task_id,
+                reason=f"background_dispatch_exception: {type(exc).__name__}: {exc}",
+                body={"label": label},
+            )
+        except Exception:
+            logger.exception("could not emit telemetry for failed background dispatch")
 
 
 def _new_task_id() -> str:
@@ -220,7 +252,7 @@ class ToolRegistry:
         skill_kind = a.get("route_kind") or "subagent"
         skill_limit = int(a.get("skill_limit", 15))
         skill_payload = await self._build_skill_payload(skill_kind, skill_limit)
-        result = await self._d.subagent.dispatch(
+        coro = self._d.subagent.dispatch(
             task_id=task_id,
             task=task,
             agent_hint=a.get("agent_hint"),
@@ -230,6 +262,26 @@ class ToolRegistry:
             skill_header=skill_payload["header"],
             skill_roots=skill_payload["roots"],
         )
+        # 2026-05-21 (mcp-bg): opt-in fire-and-forget for long dispatches.
+        # MCP HTTP clients time out at ~60s but a real subagent takes
+        # 200-2000s. Background mode returns task_id immediately; caller
+        # polls mcp__fleet__status for completion.
+        if bool(a.get("run_in_background", False)):
+            asyncio.create_task(
+                _supervise_background_dispatch(
+                    coro,
+                    task_id=task_id,
+                    telemetry=self._d.telemetry,
+                    label="subagent",
+                )
+            )
+            return {
+                "task_id": task_id,
+                "status": "started",
+                "background": True,
+                "note": "Poll mcp__fleet__status for completion.",
+            }
+        result = await coro
         return _result_dict(task_id, result)
 
     async def _dispatch_subagent_cheap(self, a: dict[str, Any]) -> dict[str, Any]:
@@ -258,7 +310,7 @@ class ToolRegistry:
         skill_kind = a.get("route_kind") or "subagent"
         skill_limit = int(a.get("skill_limit", 15))
         skill_payload = await self._build_skill_payload(skill_kind, skill_limit)
-        result = await self._d.subagent.dispatch(
+        coro = self._d.subagent.dispatch(
             task_id=task_id,
             task=task,
             agent_hint=a.get("agent_hint"),
@@ -269,6 +321,25 @@ class ToolRegistry:
             skill_roots=skill_payload["roots"],
             model=model,
         )
+        # 2026-05-21 (mcp-bg): same fire-and-forget option as
+        # _dispatch_subagent (see comment there).
+        if bool(a.get("run_in_background", False)):
+            asyncio.create_task(
+                _supervise_background_dispatch(
+                    coro,
+                    task_id=task_id,
+                    telemetry=self._d.telemetry,
+                    label="subagent_cheap",
+                )
+            )
+            return {
+                "task_id": task_id,
+                "status": "started",
+                "background": True,
+                "model": model,
+                "note": "Poll mcp__fleet__status for completion.",
+            }
+        result = await coro
         return {**_result_dict(task_id, result), "model": model}
 
     async def _dispatch_subagent_inherit(self, a: dict[str, Any]) -> dict[str, Any]:
@@ -286,7 +357,6 @@ class ToolRegistry:
 
         The temp file is cleaned up in a finally block after dispatch.
         """
-        import contextlib
         import json
         import tempfile
         from pathlib import Path
@@ -324,32 +394,63 @@ class ToolRegistry:
                 json.dump({"mcpServers": filtered}, tmp)
                 mcp_config_path = tmp.name
 
-        try:
-            isolation = a.get("isolation", "worktree")
-            skill_kind = a.get("route_kind") or "subagent"
-            skill_limit = int(a.get("skill_limit", 15))
-            skill_payload = await self._build_skill_payload(skill_kind, skill_limit)
-            result = await self._d.subagent.dispatch(
-                task_id=task_id,
-                task=task,
-                agent_hint=a.get("agent_hint"),
-                cwd=cwd,
-                auto_commit=bool(a.get("auto_commit", True)),
-                isolation=isolation,
-                skill_header=skill_payload["header"],
-                skill_roots=skill_payload["roots"],
-                allowed_tools=allowed_tools,
-                mcp_config_path=mcp_config_path,
+        isolation = a.get("isolation", "worktree")
+        skill_kind = a.get("route_kind") or "subagent"
+        skill_limit = int(a.get("skill_limit", 15))
+        skill_payload = await self._build_skill_payload(skill_kind, skill_limit)
+        # 2026-05-21 (mcp-bg): same fire-and-forget option as the other
+        # dispatch_subagent variants. Note: with run_in_background=True we
+        # CANNOT clean up mcp_config_path in this function's finally — the
+        # background task still needs the file. The dispatcher's subprocess
+        # cleanup releases it.
+        run_in_background = bool(a.get("run_in_background", False))
+
+        async def _do_dispatch_and_cleanup() -> Any:
+            import contextlib as _ctx
+            from pathlib import Path as _Path
+
+            try:
+                return await self._d.subagent.dispatch(
+                    task_id=task_id,
+                    task=task,
+                    agent_hint=a.get("agent_hint"),
+                    cwd=cwd,
+                    auto_commit=bool(a.get("auto_commit", True)),
+                    isolation=isolation,
+                    skill_header=skill_payload["header"],
+                    skill_roots=skill_payload["roots"],
+                    allowed_tools=allowed_tools,
+                    mcp_config_path=mcp_config_path,
+                )
+            finally:
+                if mcp_config_path:
+                    with _ctx.suppress(OSError):
+                        _Path(mcp_config_path).unlink(missing_ok=True)
+
+        if run_in_background:
+            asyncio.create_task(
+                _supervise_background_dispatch(
+                    _do_dispatch_and_cleanup(),
+                    task_id=task_id,
+                    telemetry=self._d.telemetry,
+                    label="subagent_inherit",
+                )
             )
             return {
-                **_result_dict(task_id, result),
+                "task_id": task_id,
+                "status": "started",
+                "background": True,
                 "mcp_servers_inherited": mcp_servers,
                 "allowed_tools_override": allowed_tools is not None,
+                "note": "Poll mcp__fleet__status for completion.",
             }
-        finally:
-            if mcp_config_path:
-                with contextlib.suppress(OSError):
-                    Path(mcp_config_path).unlink(missing_ok=True)
+
+        result = await _do_dispatch_and_cleanup()
+        return {
+            **_result_dict(task_id, result),
+            "mcp_servers_inherited": mcp_servers,
+            "allowed_tools_override": allowed_tools is not None,
+        }
 
     async def _build_skill_payload(self, kind: str, limit: int) -> dict[str, Any]:
         """Load + filter skills, return (header, roots) for dispatcher injection."""
