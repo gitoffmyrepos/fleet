@@ -22,14 +22,15 @@ def deps() -> MagicMock:
     return d
 
 
-def test_lists_17_tools(deps: MagicMock) -> None:
-    """2026-05-11: two new dispatchers landed for symbiosis with Hermes —
-    dispatch_subagent_cheap (model routing) and dispatch_subagent_inherit
-    (MCP/tool allowlist inheritance). See /tmp/hermes-vs-fleet.md §4.
+def test_lists_22_tools(deps: MagicMock) -> None:
+    """2026-05-11: two dispatchers landed for symbiosis with Hermes.
+    SP-F 2026-05-24: five more tools — work-LLM chain + GitHub Issues
+    coordination primitives for SP-E (Openclaw + Hermes parallel
+    issue-workers). See fleet/docs/2026-05-24-sp-f-fleet-mcp-boost-design.md.
     """
     r = ToolRegistry(deps)
     names = r.list_tool_names()
-    assert len(names) == 17
+    assert len(names) == 22
     expected = {
         "route",
         "dispatch_swarm",
@@ -48,6 +49,12 @@ def test_lists_17_tools(deps: MagicMock) -> None:
         "telemetry",
         "cancel",
         "circuit_close",
+        # SP-F (2026-05-24)
+        "llm_complete",
+        "claim_issue",
+        "release_issue",
+        "peer_review_request",
+        "list_claimable_issues",
     }
     assert set(names) == expected
 

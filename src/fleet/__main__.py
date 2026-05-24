@@ -14,11 +14,13 @@ from anthropic import AsyncAnthropic
 from .cache import Cache
 from .circuit import CircuitRegistry
 from .config import Settings, load
+from .coordination import Coordinator
 from .dispatcher.phase import PhaseDispatcher
 from .dispatcher.subagent import SubagentDispatcher
 from .dispatcher.swarm import SwarmDispatcher
 from .dispatcher.verify import VerifyDispatcher
 from .graphiti_client import GraphitiClient
+from .llm import LLMChain
 from .registry import Registry, RegistryConfig
 from .router import Router
 from .server import build_app
@@ -39,6 +41,9 @@ class _Deps:
     phase: PhaseDispatcher
     subagent: SubagentDispatcher
     verify: VerifyDispatcher
+    # SP-F (2026-05-24): work-LLM chain + GitHub coordination.
+    llm_chain: LLMChain
+    coordinator: Coordinator
 
 
 async def _build_deps(settings: Settings) -> _Deps:
@@ -101,6 +106,9 @@ async def _build_deps(settings: Settings) -> _Deps:
         timeout_seconds=settings.dispatch_timeout_seconds,
         claude_path=settings.claude_cli_path,
     )
+    # SP-F (2026-05-24): wire LLM provider chain + GitHub coordinator.
+    llm_chain = LLMChain.from_settings(settings, telemetry=telemetry)
+    coordinator = Coordinator(settings=settings, telemetry=telemetry)
     return _Deps(
         graphiti=graphiti,
         telemetry=telemetry,
@@ -112,6 +120,8 @@ async def _build_deps(settings: Settings) -> _Deps:
         phase=phase,
         subagent=subagent,
         verify=verify,
+        llm_chain=llm_chain,
+        coordinator=coordinator,
     )
 
 

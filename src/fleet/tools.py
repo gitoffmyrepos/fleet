@@ -152,6 +152,12 @@ class ToolRegistry:
             "telemetry": self._telemetry,
             "cancel": self._cancel,
             "circuit_close": self._circuit_close,
+            # SP-F (2026-05-24): work-LLM chain + GitHub Issues coordination.
+            "llm_complete": self._llm_complete,
+            "claim_issue": self._claim_issue,
+            "release_issue": self._release_issue,
+            "peer_review_request": self._peer_review_request,
+            "list_claimable_issues": self._list_claimable_issues,
         }
 
     def list_tool_names(self) -> list[str]:
@@ -267,7 +273,7 @@ class ToolRegistry:
         # 200-2000s. Background mode returns task_id immediately; caller
         # polls mcp__fleet__status for completion.
         if bool(a.get("run_in_background", False)):
-            asyncio.create_task(
+            asyncio.create_task(  # noqa: RUF006 (fire-and-forget by design)
                 _supervise_background_dispatch(
                     coro,
                     task_id=task_id,
@@ -324,7 +330,7 @@ class ToolRegistry:
         # 2026-05-21 (mcp-bg): same fire-and-forget option as
         # _dispatch_subagent (see comment there).
         if bool(a.get("run_in_background", False)):
-            asyncio.create_task(
+            asyncio.create_task(  # noqa: RUF006 (fire-and-forget by design)
                 _supervise_background_dispatch(
                     coro,
                     task_id=task_id,
@@ -428,7 +434,7 @@ class ToolRegistry:
                         _Path(mcp_config_path).unlink(missing_ok=True)
 
         if run_in_background:
-            asyncio.create_task(
+            asyncio.create_task(  # noqa: RUF006 (fire-and-forget by design)
                 _supervise_background_dispatch(
                     _do_dispatch_and_cleanup(),
                     task_id=task_id,
@@ -589,3 +595,132 @@ class ToolRegistry:
         name = _require(a, "name")
         ok = self._d.circuits.close(name)
         return {"name": name, "closed": bool(ok)}
+
+    # ------------------------------------------------------------------ #
+    # SP-F (2026-05-24) — work-LLM completion + GitHub coordination.
+    # ------------------------------------------------------------------ #
+
+    async def _llm_complete(self, a: dict[str, Any]) -> dict[str, Any]:
+        """Call Fleet's LLM provider chain with priority fallback.
+
+        Args:
+            prompt: str (required)
+            max_tokens: int = 4000
+            system: str | None
+            prefer_model: str | None — "provider/model" to start from
+            task_id: str | None — for telemetry correlation
+
+        Returns:
+            {ok: true, text, model_used, rungs_attempted: [...], elapsed_ms}
+            OR
+            {ok: false, error, rungs_attempted: [...]}
+        """
+        from fleet.llm import LLMChainExhaustedError
+
+        prompt = _require(a, "prompt")
+        max_tokens = int(a.get("max_tokens", 4000))
+        system = a.get("system")
+        prefer = a.get("prefer_model")
+        task_id = a.get("task_id") or _new_task_id()
+        try:
+            result = await self._d.llm_chain.complete(
+                prompt,
+                max_tokens=max_tokens,
+                system=system,
+                prefer_model=prefer,
+                task_id=task_id,
+            )
+            return {
+                "ok": True,
+                "task_id": task_id,
+                "text": result.text,
+                "model_used": result.model_used,
+                "rungs_attempted": [
+                    {
+                        "provider": r.provider,
+                        "model": r.model,
+                        "outcome": r.outcome,
+                        "elapsed_ms": r.elapsed_ms,
+                        "error": r.error,
+                    }
+                    for r in result.rungs_attempted
+                ],
+                "elapsed_ms": result.elapsed_ms,
+            }
+        except LLMChainExhaustedError as e:
+            return {
+                "ok": False,
+                "task_id": task_id,
+                "error": str(e),
+                "rungs_attempted": [
+                    {
+                        "provider": r.provider,
+                        "model": r.model,
+                        "outcome": r.outcome,
+                        "elapsed_ms": r.elapsed_ms,
+                        "error": r.error,
+                    }
+                    for r in e.rungs
+                ],
+            }
+
+    async def _claim_issue(self, a: dict[str, Any]) -> dict[str, Any]:
+        """Atomically claim a GitHub issue for an agent."""
+        repo = _require(a, "repo")
+        number = int(_require(a, "number"))
+        agent = _require(a, "agent")
+        result = await self._d.coordinator.claim_issue(repo, number, agent)
+        return {
+            "ok": result.ok,
+            "blocked_by_agent": result.blocked_by_agent,
+            "error": result.error,
+        }
+
+    async def _release_issue(self, a: dict[str, Any]) -> dict[str, Any]:
+        """Release an agent's claim on a GitHub issue."""
+        from fleet.coordination import CoordinationError
+
+        repo = _require(a, "repo")
+        number = int(_require(a, "number"))
+        agent = _require(a, "agent")
+        try:
+            await self._d.coordinator.release_issue(repo, number, agent)
+            return {"ok": True}
+        except CoordinationError as e:
+            return {"ok": False, "error": str(e)}
+
+    async def _peer_review_request(self, a: dict[str, Any]) -> dict[str, Any]:
+        """Post a peer-review request comment on a PR."""
+        from fleet.coordination import CoordinationError
+
+        pr_url = _require(a, "pr_url")
+        reviewer_agent = _require(a, "reviewer_agent")
+        try:
+            await self._d.coordinator.peer_review_request(pr_url, reviewer_agent)
+            return {"ok": True}
+        except CoordinationError as e:
+            return {"ok": False, "error": str(e)}
+
+    async def _list_claimable_issues(self, a: dict[str, Any]) -> dict[str, Any]:
+        """List open issues an agent could claim (no claimed-by-* label,
+        no do-not-auto-fix label)."""
+        from fleet.coordination import CoordinationError
+
+        repo = _require(a, "repo")
+        agent = _require(a, "agent")
+        try:
+            issues = await self._d.coordinator.list_claimable(repo, agent)
+            return {
+                "ok": True,
+                "issues": [
+                    {
+                        "number": i.number,
+                        "title": i.title,
+                        "labels": i.labels,
+                        "url": i.url,
+                    }
+                    for i in issues
+                ],
+            }
+        except CoordinationError as e:
+            return {"ok": False, "error": str(e), "issues": []}

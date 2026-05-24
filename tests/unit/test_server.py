@@ -98,7 +98,14 @@ async def test_list_tools_endpoint(deps: MagicMock) -> None:
         # 2026-05-11: +2 tools (dispatch_subagent_cheap + dispatch_subagent_inherit).
         assert "dispatch_subagent_cheap" in names
         assert "dispatch_subagent_inherit" in names
-        assert len(names) == 17
+        # SP-F 2026-05-24: +5 tools (llm_complete + claim_issue + release_issue
+        # + peer_review_request + list_claimable_issues).
+        assert "llm_complete" in names
+        assert "claim_issue" in names
+        assert "release_issue" in names
+        assert "peer_review_request" in names
+        assert "list_claimable_issues" in names
+        assert len(names) == 22
 
 
 # ─── 2026-05-12 multi-token rotation tests ─────────────────────────────────

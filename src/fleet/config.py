@@ -61,6 +61,23 @@ class Settings(BaseSettings):
 
     anthropic_api_key: str = ""
 
+    # SP-F (2026-05-24): work-LLM provider chain keys. Wired via
+    # ExternalSecret fleet-secrets — Vault paths:
+    #   secret/forex/llm/{minimax,deepseek,gemini} with property `api_key`
+    #   strategybase/fleet with property `openrouter_api_key`
+    # The chain tries opus → gpt(via openrouter) → sonnet → minimax →
+    # deepseek → gemini in order, falling back on 429/5xx/timeout/auth.
+    # See docs/2026-05-24-sp-f-fleet-mcp-boost-design.md.
+    openrouter_api_key: str = ""
+    minimax_api_key: str = ""
+    deepseek_api_key: str = ""
+    gemini_api_key: str = ""
+
+    # GitHub PAT for SP-E coordination (claim_issue, peer_review_request).
+    # Wired via ExternalSecret fleet-git-creds; same PAT used for git push.
+    # If empty, coordination MCP tools degrade gracefully (return error).
+    github_token: str = ""
+
     per_task_budget_tokens: int = 300_000  # raised from 200k for deep forensic investigations
     registry_refresh_seconds: int = 300
     cache_ttl_seconds: int = 86_400
