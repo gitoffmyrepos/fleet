@@ -75,11 +75,12 @@ class LLMChain:
     """
 
     DEFAULT_CHAIN = [
-        ("anthropic", "claude-opus-4-7"),
-        ("openrouter", "openai/gpt-5"),
-        ("anthropic", "claude-sonnet-4-6"),
-        ("openrouter", "minimax/minimax-m2"),
-        ("deepseek",  "deepseek-chat"),
+        ("anthropic",  "claude-opus-4-7"),
+        ("openrouter", "openai/gpt-5"),         # via openrouter (already wired)
+        ("anthropic",  "claude-sonnet-4-6"),
+        ("minimax",    "minimax-m2"),           # direct, key in vault
+        ("deepseek",   "deepseek-chat"),        # direct, key in vault
+        ("gemini",     "gemini-2.5-pro"),       # last-resort fallback
     ]
 ```
 
@@ -95,7 +96,9 @@ class LLMChain:
 **Provider adapters** (`src/fleet/llm/providers/`):
 - `anthropic.py`: thin wrapper around existing `anthropic` SDK in `requirements`
 - `openrouter.py`: OpenAI-compatible client (`openai` SDK with `base_url=https://openrouter.ai/api/v1`)
+- `minimax.py`: MiniMax-compatible client (`base_url=https://api.minimax.io/v1`) — likely OpenAI-compatible chat API; verify against latest docs at implementation time
 - `deepseek.py`: OpenAI-compatible client (`openai` SDK with `base_url=https://api.deepseek.com/v1`)
+- `gemini.py`: Google Generative AI SDK (`google-generativeai`) — different API shape from the rest, needs its own adapter
 
 Each adapter implements:
 ```python
@@ -167,18 +170,30 @@ All three tools require existing Fleet bearer auth (no new auth surface).
 
 ### 4. ExternalSecret update — `sb-gitops`
 
-Add `deepseek` to `fleet-llm-keys` ExternalSecret so Fleet pod gets `FLEET_DEEPSEEK_API_KEY`.
+Fleet pod currently has env: `FLEET_ANTHROPIC_API_KEY`, `FLEET_OPENROUTER_API_KEY`.
+Need to add 3 more keys so all 6 rungs work: `FLEET_MINIMAX_API_KEY`,
+`FLEET_DEEPSEEK_API_KEY`, `FLEET_GEMINI_API_KEY`.
 
-File: `prod/platform-workloads/manifests/fleet/external-secrets.yaml` (or wherever the existing fleet ExternalSecret lives — discover during implementation).
+File: `prod/platform-workloads/manifests/fleet/external-secrets.yaml` (or wherever
+the existing fleet ExternalSecret lives — discover during implementation).
 
 ```yaml
+- secretKey: minimax
+  remoteRef:
+    key: secret/forex/llm/minimax
+    property: api_key
 - secretKey: deepseek
   remoteRef:
     key: secret/forex/llm/deepseek
     property: api_key
+- secretKey: gemini
+  remoteRef:
+    key: secret/forex/llm/gemini
+    property: api_key
 ```
 
-Verify Vault has the key first (memory says yes — `secret/forex/llm/deepseek` exists with `api_key` property).
+Vault keys all confirmed present via `vault kv list secret/forex/llm`:
+anthropic, deepseek, gemini, minimax, ollama, openrouter — all with `api_key` property.
 
 ## Data flow
 
@@ -214,7 +229,7 @@ Verify Vault has the key first (memory says yes — `secret/forex/llm/deepseek` 
 | All 5 LLM rungs fail | `LLMChainExhaustedError` raised; MCP tool returns `{ok: false, rungs: [...]}`. Caller decides retry or abort. |
 | GitHub auth fails on `claim_issue` | Tool returns `{ok: false, error: "gh_auth"}`. SP-E poller surfaces to ops. |
 | ETag CAS retry exhausted (race with other agent) | Tool returns `{ok: false, blocked_by_agent: <name>}`. Caller picks a different issue. |
-| ExternalSecret missing deepseek key | Last rung fails → telemetry alarms; chain still works for rungs 1-4. |
+| ExternalSecret missing minimax/deepseek/gemini key | Corresponding rung fails → telemetry alarms; chain still works for rungs that have keys. |
 
 ## Testing
 
@@ -239,7 +254,9 @@ Per `feedback_no_skipping_issues.md`: comprehensive coverage.
 | `fleet/src/fleet/llm/provider_chain.py` | new, ~180 LOC |
 | `fleet/src/fleet/llm/providers/anthropic.py` | new, ~40 LOC |
 | `fleet/src/fleet/llm/providers/openrouter.py` | new, ~50 LOC |
+| `fleet/src/fleet/llm/providers/minimax.py` | new, ~50 LOC |
 | `fleet/src/fleet/llm/providers/deepseek.py` | new, ~40 LOC |
+| `fleet/src/fleet/llm/providers/gemini.py` | new, ~60 LOC (different API shape) |
 | `fleet/src/fleet/coordination.py` | new, ~140 LOC |
 | `fleet/src/fleet/config.py` | +5 lines for openrouter/deepseek env vars |
 | `fleet/src/fleet/tools.py` | +60 LOC for 3 MCP tools |
