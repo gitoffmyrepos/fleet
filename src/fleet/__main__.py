@@ -73,6 +73,26 @@ async def _build_deps(settings: Settings) -> _Deps:
             },
             {"name": "claude", "root": settings.agents_root, "pattern": "*.md"},
             {"name": "gsd", "root": f"{settings.commands_root}/gsd", "pattern": "*.md"},
+            # SP-B (2026-05-24): claude-bughunter — 51 security/bug-hunt skills
+            # + 14 slash commands + 574+ disclosed-report patterns across 24
+            # vuln classes. Source: elementalsouls/claude-bughunter (MIT).
+            # Safety-audited; payloads are documented attack patterns, not
+            # active code. Auto-fires on bug/vuln/sec context via standard
+            # Claude skill protocol — agents must still respect the bundle's
+            # built-in triage-validation 7-Question Gate (in-scope check).
+            {
+                "name": "claude-bughunter",
+                "root": f"{settings.skills_root}/claude-bughunter/skills",
+                "pattern": "*/SKILL.md",
+            },
+            # SP-C (2026-05-24): frontend-super-skill — composes taste-skill,
+            # design-motion-principles, impeccable into one decision-tree
+            # entry point. Auto-fires on UI/React/Tailwind/Streamlit work.
+            {
+                "name": "frontend-super-skill",
+                "root": f"{settings.skills_root}/frontend-super-skill",
+                "pattern": "SKILL.md",
+            },
         ]
     )
     registry = Registry(rcfg, graphiti=graphiti)
