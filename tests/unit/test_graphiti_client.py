@@ -62,6 +62,29 @@ async def test_add_episode_calls_add_memory_with_auth(client: GraphitiClient) ->
 
 
 @respx.mock
+async def test_add_episode_normalizes_graphiti_incompatible_utc_timestamp(
+    client: GraphitiClient,
+) -> None:
+    route = respx.post("http://fake/mcp").mock(
+        return_value=Response(200, json=_ok_envelope({"message": "queued"}))
+    )
+    await client.add_episode(
+        kind="fleet_dispatch_finished",
+        body={
+            "finished_at": "2026-05-11T02:39:26.497097Z[UTC]",
+            "nested": ["2026-05-11T02:39:26Z[UTC]"],
+            "description": "observed at 2026-05-11T02:39:26Z[UTC]",
+        },
+        parent_task_id="task_xyz",
+    )
+    args = json.loads(route.calls[0].request.content)["params"]["arguments"]
+    episode = json.loads(args["episode_body"])
+    assert episode["body"]["finished_at"] == "2026-05-11T02:39:26.497097Z"
+    assert episode["body"]["nested"] == ["2026-05-11T02:39:26Z"]
+    assert episode["body"]["description"] == "observed at 2026-05-11T02:39:26Z[UTC]"
+
+
+@respx.mock
 async def test_cache_entry_uses_per_hash_group(client: GraphitiClient) -> None:
     route = respx.post("http://fake/mcp").mock(
         return_value=Response(200, json=_ok_envelope({"message": "queued"}))

@@ -19,6 +19,7 @@ config.py.
 from __future__ import annotations
 
 import json
+import re
 import uuid
 from typing import Any
 
@@ -28,6 +29,19 @@ import httpx
 FLEET_GROUP = "fleet"
 # Cache entries use a per-hash group so lookup-by-hash is O(N=1) within the group.
 CACHE_GROUP_PREFIX = "fleet_cache"
+_UTC_TIMESTAMP_SUFFIX = re.compile(r"^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z)\[UTC\]$")
+
+
+def _normalize_episode_value(value: Any) -> Any:
+    """Normalize non-standard timestamps before Graphiti extracts dates."""
+    if isinstance(value, dict):
+        return {key: _normalize_episode_value(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_normalize_episode_value(item) for item in value]
+    if isinstance(value, str):
+        match = _UTC_TIMESTAMP_SUFFIX.fullmatch(value)
+        return match.group(1) if match else value
+    return value
 
 
 def _parse_sse_or_json(body: str) -> dict[str, Any]:
@@ -113,7 +127,7 @@ class GraphitiClient:
         )
         episode = {
             "fleet_id": fleet_id,
-            "body": body,
+            "body": _normalize_episode_value(body),
             "parent_task_id": parent_task_id,
             "kind": kind,
         }
