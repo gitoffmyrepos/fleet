@@ -11,7 +11,9 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from fleet.config import Settings
 from fleet.llm.provider_chain import (
+    DEFAULT_CHAIN,
     LLMChain,
     LLMChainExhaustedError,
 )
@@ -42,12 +44,27 @@ def _make_chain(adapters: dict[str, Any], keys: dict[str, str] | None = None) ->
             ("gemini", "gemini-2.5-pro"),
         ],
         keys=keys if keys is not None else default_keys,
+        # 2026-09-17: adapters are per-instance now (a base_url-bound local
+        # adapter must not leak between chains), so inject rather than
+        # rebinding the module-level map after construction.
+        adapters=adapters,
     )
-    # Monkey-patch the adapter map.
-    from fleet.llm import provider_chain as pc
-
-    pc._ADAPTERS = adapters
     return chain
+
+
+def _settings_with_local(local_api_key: str) -> Settings:
+    """Hermetic Settings (`_env_file=None`, env-independent premium keys)
+    with the given local-LLM key, so `LLMChain.from_settings` is
+    deterministic regardless of the test runner's environment."""
+    return Settings(
+        _env_file=None,  # type: ignore[call-arg]
+        local_llm_api_key=local_api_key,
+        anthropic_api_key="k_a",
+        openrouter_api_key="k_o",
+        minimax_api_key="k_m",
+        deepseek_api_key="k_d",
+        gemini_api_key="k_g",
+    )
 
 
 @pytest.mark.asyncio
@@ -206,3 +223,85 @@ async def test_prefer_model_starts_at_specific_rung() -> None:
     assert result.model_used == "anthropic/claude-sonnet-4-6"
     # Only 1 rung attempted because we started at sonnet (rung 3).
     assert len(result.rungs_attempted) == 1
+
+
+@pytest.mark.asyncio
+async def test_local_rung_used_first_when_key_configured() -> None:
+    """FLEET_LOCAL_LLM_API_KEY set → local is rung 0 and answers first."""
+    chain = LLMChain.from_settings(_settings_with_local(local_api_key="k_l"))
+    # Local rung prepended; premium chain stays intact behind it.
+    assert chain._chain[0] == ("local", "qwen3.8-27b")
+    assert chain._chain[1:] == DEFAULT_CHAIN
+
+    adapter_local = AsyncMock(return_value="from local")
+    adapter_anthropic = AsyncMock(return_value="WRONG")
+    chain._adapters = {
+        "local": adapter_local,
+        "anthropic": adapter_anthropic,
+        "openrouter": AsyncMock(return_value="WRONG"),
+        "minimax": AsyncMock(return_value="WRONG"),
+        "deepseek": AsyncMock(return_value="WRONG"),
+        "gemini": AsyncMock(return_value="WRONG"),
+    }
+    result = await chain.complete("hello")
+    assert result.text == "from local"
+    assert result.model_used == "local/qwen3.8-27b"
+    assert len(result.rungs_attempted) == 1
+    assert result.rungs_attempted[0].outcome == "ok"
+    # No premium rung may be touched.
+    adapter_anthropic.assert_not_called()
+    # from_settings must not have mutated the module-level DEFAULT_CHAIN.
+    assert len(DEFAULT_CHAIN) == 6
+    assert DEFAULT_CHAIN[0] == ("anthropic", "claude-opus-4-7")
+
+
+@pytest.mark.asyncio
+async def test_local_transient_error_falls_through_to_anthropic() -> None:
+    """Local gateway 5xx (transient) → retries exhaust → opus answers."""
+    chain = LLMChain.from_settings(_settings_with_local(local_api_key="k_l"))
+    chain.PER_RUNG_ATTEMPTS = 1  # skip backoff sleeps for test speed
+
+    adapter_local = AsyncMock(side_effect=ProviderTransientError("503"))
+    adapter_anthropic = AsyncMock(return_value="from opus")
+    chain._adapters = {
+        "local": adapter_local,
+        "anthropic": adapter_anthropic,
+        "openrouter": AsyncMock(return_value="WRONG"),
+        "minimax": AsyncMock(return_value="WRONG"),
+        "deepseek": AsyncMock(return_value="WRONG"),
+        "gemini": AsyncMock(return_value="WRONG"),
+    }
+    result = await chain.complete("hello")
+    assert result.text == "from opus"
+    assert result.model_used == "anthropic/claude-opus-4-7"
+    # Local rung attempted (transient) then anthropic (ok).
+    assert len(result.rungs_attempted) == 2
+    assert result.rungs_attempted[0].provider == "local"
+    assert result.rungs_attempted[0].outcome == "transient"
+    assert result.rungs_attempted[1].outcome == "ok"
+    assert adapter_local.call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_local_rung_absent_when_key_empty() -> None:
+    """FLEET_LOCAL_LLM_API_KEY empty → chain is exactly DEFAULT_CHAIN and
+    the local adapter is never consulted (no missing_key entry either)."""
+    chain = LLMChain.from_settings(_settings_with_local(local_api_key=""))
+    assert chain._chain == DEFAULT_CHAIN
+
+    adapter_local = AsyncMock(return_value="WRONG")
+    chain._adapters = {
+        "local": adapter_local,
+        "anthropic": AsyncMock(return_value="from opus"),
+        "openrouter": AsyncMock(return_value="WRONG"),
+        "minimax": AsyncMock(return_value="WRONG"),
+        "deepseek": AsyncMock(return_value="WRONG"),
+        "gemini": AsyncMock(return_value="WRONG"),
+    }
+    result = await chain.complete("hello")
+    assert result.model_used == "anthropic/claude-opus-4-7"
+    adapter_local.assert_not_called()
+    assert all(r.provider != "local" for r in result.rungs_attempted)
+    # DEFAULT_CHAIN still intact after key-set and key-empty from_settings.
+    assert len(DEFAULT_CHAIN) == 6
+    assert DEFAULT_CHAIN[0] == ("anthropic", "claude-opus-4-7")

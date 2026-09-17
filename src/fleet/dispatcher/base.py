@@ -201,8 +201,8 @@ class DispatcherBase(abc.ABC):
         # survives a SIGKILL.
         try:
             _LOG_DIR.mkdir(parents=True, exist_ok=True)
-            stdout_log = _LOG_DIR / f"{task_id}.out"
-            stderr_log = _LOG_DIR / f"{task_id}.err"
+            stdout_log: Path | None = _LOG_DIR / f"{task_id}.out"
+            stderr_log: Path | None = _LOG_DIR / f"{task_id}.err"
         except OSError as exc:
             logger.warning("could not create dispatch log dir: %s", exc)
             stdout_log = stderr_log = None  # streaming disabled, fall back
@@ -909,7 +909,8 @@ class DispatcherBase(abc.ABC):
             return (
                 True,
                 (
-                    f"agent claimed {n_tasks_claimed}/{m_tasks.group(2)} tasks complete "
+                    f"agent claimed {n_tasks_claimed}/"
+                    f"{m_tasks.group(2) if m_tasks else '?'} tasks complete "
                     f"but no commits were produced (persistence_note={persistence_note!r}, "
                     f"head unchanged at {pre_head[:8] if pre_head else 'unknown'})"
                 ),

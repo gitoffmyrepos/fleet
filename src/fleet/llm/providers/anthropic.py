@@ -33,7 +33,8 @@ async def complete(
                 model=model,
                 max_tokens=max_tokens,
                 messages=[{"role": "user", "content": prompt}],
-                system=system if system else _sdk.NOT_GIVEN,
+                # SDK >=0.40 takes `omit` here, not the legacy NOT_GIVEN.
+                system=system if system else _sdk.omit,
             ),
             timeout=timeout_s,
         )

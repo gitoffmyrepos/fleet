@@ -12,6 +12,7 @@ Endpoint: POST /v1beta/models/{model}:generateContent?key={api_key}
 from __future__ import annotations
 
 import asyncio
+from typing import Any
 
 import httpx
 
@@ -40,7 +41,7 @@ async def complete(
     model_path = model if model.startswith("models/") else f"models/{model}"
     url = f"{BASE_URL}/{model_path}:generateContent"
 
-    body: dict = {
+    body: dict[str, Any] = {
         "contents": [
             {"role": "user", "parts": [{"text": prompt}]},
         ],

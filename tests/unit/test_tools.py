@@ -22,15 +22,16 @@ def deps() -> MagicMock:
     return d
 
 
-def test_lists_22_tools(deps: MagicMock) -> None:
+def test_lists_23_tools(deps: MagicMock) -> None:
     """2026-05-11: two dispatchers landed for symbiosis with Hermes.
     SP-F 2026-05-24: five more tools — work-LLM chain + GitHub Issues
     coordination primitives for SP-E (Openclaw + Hermes parallel
     issue-workers). See fleet/docs/2026-05-24-sp-f-fleet-mcp-boost-design.md.
+    2026-09-17: dispatch_local — local-fleet bridge.
     """
     r = ToolRegistry(deps)
     names = r.list_tool_names()
-    assert len(names) == 22
+    assert len(names) == 23
     expected = {
         "route",
         "dispatch_swarm",
@@ -55,6 +56,8 @@ def test_lists_22_tools(deps: MagicMock) -> None:
         "release_issue",
         "peer_review_request",
         "list_claimable_issues",
+        # 2026-09-17: local-fleet bridge.
+        "dispatch_local",
     }
     assert set(names) == expected
 
@@ -150,6 +153,6 @@ async def test_handler_response_keys(
 
     r = ToolRegistry(deps)
     out = await r.call(tool, args)
-    assert (
-        set(out.keys()) >= expected_keys
-    ), f"{tool} missing keys: {expected_keys - set(out.keys())}"
+    assert set(out.keys()) >= expected_keys, (
+        f"{tool} missing keys: {expected_keys - set(out.keys())}"
+    )

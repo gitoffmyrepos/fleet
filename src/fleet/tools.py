@@ -3,15 +3,27 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import uuid
 import warnings
+from collections.abc import Awaitable
 from dataclasses import asdict
+from pathlib import Path
 from typing import Any
 
 from .cache import task_hash
 
 logger = logging.getLogger(__name__)
+
+# 2026-09-17 (dispatch_local): bridge to the local-fleet CLI — the bounded
+# local-GPU fan-out for "premium model orchestrates, local model codes".
+# The CLI owns worktree creation, the depth-1 recursion guard, and the
+# per-task timeout; this tool only validates args, spawns it exactly
+# once, and parses its JSON array. Never retry, never loop, never merge.
+_LOCAL_FLEET_BIN = "/home/kelvin/.local/bin/local-fleet"
+_MAX_DISPATCH_LOCAL_TASKS = 6
+_DISPATCH_LOCAL_GRACE_SECONDS = 120.0
 
 
 class ToolError(RuntimeError):
@@ -19,10 +31,10 @@ class ToolError(RuntimeError):
 
 
 async def _supervise_background_dispatch(
-    coro,
+    coro: Awaitable[Any],
     *,
     task_id: str,
-    telemetry,
+    telemetry: Any,
     label: str,
 ) -> None:
     """Run a backgrounded dispatch coroutine and ensure failures are logged.
@@ -158,6 +170,8 @@ class ToolRegistry:
             "release_issue": self._release_issue,
             "peer_review_request": self._peer_review_request,
             "list_claimable_issues": self._list_claimable_issues,
+            # 2026-09-17: local-fleet bridge — bounded local-GPU fan-out.
+            "dispatch_local": self._dispatch_local,
         }
 
     def list_tool_names(self) -> list[str]:
@@ -724,3 +738,155 @@ class ToolRegistry:
             }
         except CoordinationError as e:
             return {"ok": False, "error": str(e), "issues": []}
+
+    # ------------------------------------------------------------------ #
+    # 2026-09-17 — local-fleet bridge (bounded local-GPU fan-out).
+    # ------------------------------------------------------------------ #
+
+    async def _dispatch_local(self, a: dict[str, Any]) -> dict[str, Any]:
+        """Route up to 6 coding subtasks to local Goose workers via local-fleet.
+
+        Shells out to the local-fleet CLI exactly once per invocation. The
+        CLI creates one isolated git worktree per subtask and runs each in
+        parallel under a per-task hard timeout. This tool runs the CLI
+        EXACTLY ONCE — never retries, never loops, never merges. The caller
+        inspects the per-subtask results (worktree, branch, PR url if any)
+        and decides what happens next (merge / fix / re-dispatch).
+
+        Args:
+            repo: str — existing directory (required).
+            tasks: list[str] — 1 to 6 subtask descriptions (required).
+            base: str — base branch (default "master").
+            timeout: number — per-task timeout in seconds (default 2400).
+            task_id: str — optional, for correlation.
+
+        Returns:
+            {"ok": bool, "task_id": str, "results": list, "stderr_tail": str}
+            plus "error" on every failure path.
+        """
+        task_id = a.get("task_id") or _new_task_id()
+
+        def _rejected(reason: str) -> dict[str, Any]:
+            return {
+                "ok": False,
+                "task_id": task_id,
+                "results": [],
+                "error": reason,
+                "stderr_tail": "",
+            }
+
+        # ── arg validation (everything BEFORE spawn — no partial work) ──
+        repo = _require(a, "repo")
+        if not isinstance(repo, str):
+            return _rejected("'repo' must be a string path to an existing directory")
+        if not Path(repo).is_dir():
+            return _rejected(f"repo '{repo}' is not an existing directory")
+
+        tasks = a.get("tasks")
+        if not isinstance(tasks, list | tuple):
+            return _rejected("'tasks' must be a list of 1-6 strings")
+        if len(tasks) < 1:
+            return _rejected("'tasks' must contain at least one subtask")
+        if len(tasks) > _MAX_DISPATCH_LOCAL_TASKS:
+            return _rejected(
+                f"too many tasks: {len(tasks)} (hard cap is "
+                f"{_MAX_DISPATCH_LOCAL_TASKS} — split the remainder into a "
+                "separate dispatch_local call)"
+            )
+        for t in tasks:
+            if not isinstance(t, str) or not t.strip():
+                return _rejected("each task must be a non-empty string")
+
+        try:
+            timeout = float(a.get("timeout", 2400))
+        except (TypeError, ValueError):
+            return _rejected("timeout must be a number (seconds)")
+
+        base = str(a.get("base", "master"))
+        hard_timeout = timeout + _DISPATCH_LOCAL_GRACE_SECONDS
+        argv = [
+            _LOCAL_FLEET_BIN,
+            "dispatch",
+            "--repo",
+            repo,
+            "--base",
+            base,
+            "--timeout",
+            str(timeout),
+        ]
+        for t in tasks:
+            argv += ["--task", t]
+
+        logger.info(
+            "dispatch_local: task=%s repo=%s tasks=%d base=%s timeout=%ss hard=%ss",
+            task_id,
+            repo,
+            len(tasks),
+            base,
+            timeout,
+            hard_timeout,
+        )
+
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *argv,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+        except OSError as exc:
+            logger.warning(
+                "dispatch_local %s: could not launch %s: %s", task_id, _LOCAL_FLEET_BIN, exc
+            )
+            return _rejected(f"could not launch local-fleet: {exc}")
+
+        try:
+            out_b, err_b = await asyncio.wait_for(proc.communicate(), timeout=hard_timeout)
+        except TimeoutError:
+            # Python 3.12: asyncio.TimeoutError is the built-in TimeoutError.
+            proc.kill()
+            await proc.wait()
+            logger.warning("dispatch_local %s: hard timeout after %ss", task_id, hard_timeout)
+            return {
+                "ok": False,
+                "task_id": task_id,
+                "results": [],
+                "error": f"local-fleet exceeded hard timeout of {hard_timeout}s",
+                "stderr_tail": "",
+            }
+
+        rc = proc.returncode or 0
+        stdout = out_b.decode("utf-8", errors="replace")
+        stderr = err_b.decode("utf-8", errors="replace")
+        stderr_tail = stderr[-800:]
+
+        if rc != 0:
+            logger.warning("dispatch_local %s: local-fleet exited %s", task_id, rc)
+            return {
+                "ok": False,
+                "task_id": task_id,
+                "results": [],
+                "error": f"local-fleet exited {rc}",
+                "stderr_tail": stderr_tail,
+            }
+
+        try:
+            results = json.loads(stdout)
+            if not isinstance(results, list):
+                raise ValueError("parsed JSON is not a list")
+        except (json.JSONDecodeError, ValueError) as exc:
+            logger.warning("dispatch_local %s: stdout is not a JSON array: %s", task_id, exc)
+            return {
+                "ok": False,
+                "task_id": task_id,
+                "results": [],
+                "error": "local-fleet stdout was not a JSON array",
+                "stderr_tail": stderr_tail,
+                "stdout_tail": stdout[-800:],
+            }
+
+        return {
+            "ok": True,
+            "task_id": task_id,
+            "results": results,
+            "stderr_tail": stderr_tail,
+        }

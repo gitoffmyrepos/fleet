@@ -4,6 +4,14 @@ Tries a configured list of (provider, model) tuples in order. Falls
 through to the next rung on rate-limit / 5xx / timeout / auth errors.
 Aborts the chain on 400 (permanent input error).
 
+Local-first rung (2026-09-17): when `FLEET_LOCAL_LLM_API_KEY` is
+non-empty, `LLMChain.from_settings` PREPENDS a cheap self-hosted rung
+    0. local / <local_llm_model>            (default qwen3.8-27b @ llm.strategybase.io)
+ahead of the premium chain, so free local inference is tried first and
+the premium rungs below remain the fallback. `DEFAULT_CHAIN` itself is
+unchanged — the local rung is added only at `from_settings` time and is
+absent entirely when the key is empty.
+
 Default chain (per operator decision 2026-05-24):
     1. anthropic  / claude-opus-4-7         (direct, key wired)
     2. openrouter / openai/gpt-5            (via openrouter, key wired)
@@ -23,6 +31,7 @@ import asyncio
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
+from functools import partial
 
 from fleet.config import Settings
 from fleet.llm.providers import (
@@ -34,6 +43,7 @@ from fleet.llm.providers import (
 from fleet.llm.providers import anthropic as _anthropic
 from fleet.llm.providers import deepseek as _deepseek
 from fleet.llm.providers import gemini as _gemini
+from fleet.llm.providers import local as _local
 from fleet.llm.providers import minimax as _minimax
 from fleet.llm.providers import openrouter as _openrouter
 from fleet.telemetry import Telemetry
@@ -42,6 +52,7 @@ from fleet.telemetry import Telemetry
 _AdapterFn = Callable[..., Awaitable[str]]
 
 _ADAPTERS: dict[str, _AdapterFn] = {
+    "local": _local.complete,  # base_url bound per-settings in from_settings
     "anthropic": _anthropic.complete,
     "openrouter": _openrouter.complete,
     "minimax": _minimax.complete,
@@ -104,21 +115,40 @@ class LLMChain:
         chain: list[tuple[str, str]],
         keys: dict[str, str],
         telemetry: Telemetry | None = None,
+        adapters: dict[str, _AdapterFn] | None = None,
     ) -> None:
         self._chain = chain
         self._keys = keys
         self._t = telemetry
+        # Per-instance adapter table. Overrides (e.g. a base_url-bound local
+        # adapter) live here so two chains cannot clobber each other through
+        # the module-level _ADAPTERS dict.
+        self._adapters = {**_ADAPTERS, **(adapters or {})}
 
     @classmethod
     def from_settings(cls, settings: Settings, *, telemetry: Telemetry | None = None) -> LLMChain:
         keys = {
+            "local": settings.local_llm_api_key,
             "anthropic": settings.anthropic_api_key,
             "openrouter": settings.openrouter_api_key,
             "minimax": settings.minimax_api_key,
             "deepseek": settings.deepseek_api_key,
             "gemini": settings.gemini_api_key,
         }
-        return cls(chain=DEFAULT_CHAIN, keys=keys, telemetry=telemetry)
+        chain = list(DEFAULT_CHAIN)
+        adapters: dict[str, _AdapterFn] = {}
+        if settings.local_llm_api_key:
+            # Local-first rung: cheap self-hosted inference before any
+            # premium provider; premium rungs remain the fallback.
+            chain.insert(0, ("local", settings.local_llm_model))
+            # Bind the configured base_url (FLEET_LOCAL_LLM_BASE_URL) to this
+            # chain's local adapter so the override is honored without
+            # re-reading Settings on every call.
+            adapters["local"] = partial(
+                _local.complete,
+                base_url=settings.local_llm_base_url or _local.DEFAULT_BASE_URL,
+            )
+        return cls(chain=chain, keys=keys, telemetry=telemetry, adapters=adapters)
 
     async def complete(
         self,
@@ -177,7 +207,7 @@ class LLMChain:
                 await self._fire_event(task_id, provider, model, attempt)
                 continue
 
-            adapter = _ADAPTERS[provider]
+            adapter = self._adapters[provider]
             text, attempt = await self._try_rung(
                 adapter=adapter,
                 provider=provider,

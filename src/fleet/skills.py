@@ -46,8 +46,10 @@ async def load_catalog() -> dict[str, Any]:
         }
     """
     now = time.time()
-    if _CACHE["catalog"] is not None and now - _CACHE["ts"] < _TTL:
-        return _CACHE["catalog"]
+    cached = _CACHE["catalog"]
+    if cached is not None and now - _CACHE["ts"] < _TTL:
+        assert isinstance(cached, dict)
+        return cached
     # Walk filesystem in a thread to keep the asyncio loop responsive on
     # slow disks. Catalog build is pure I/O.
     catalog = await asyncio.to_thread(_build_catalog_sync)
