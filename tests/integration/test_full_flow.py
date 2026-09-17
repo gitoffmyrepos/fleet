@@ -20,8 +20,14 @@ def test_route_swarm(fleet_url: str, headers: dict) -> None:
     assert out["kind"] == "swarm"
 
 
+# Since 3ee4fdc, dispatch_* requires an explicit cwd (defaults to the FX repo
+# literal, which doesn't exist inside the integration container). /tmp exists
+# in every container and needs no git setup.
+_CWD = "/tmp"
+
+
 def test_dispatch_swarm_caches_on_second_call(fleet_url: str, headers: dict) -> None:
-    args = {"task": "audit svcs deterministic", "agents": 5}
+    args = {"task": "audit svcs deterministic", "agents": 5, "cwd": _CWD}
     first = call(fleet_url, headers, "dispatch_swarm", args)
     assert first["cache_hit"] is False
     assert first["ok"] is True
@@ -30,13 +36,18 @@ def test_dispatch_swarm_caches_on_second_call(fleet_url: str, headers: dict) -> 
 
 
 def test_dispatch_phase_plan_returns_phase_dir(fleet_url: str, headers: dict) -> None:
-    out = call(fleet_url, headers, "dispatch_phase", {"task": "add SSE event", "stage": "plan"})
+    out = call(
+        fleet_url,
+        headers,
+        "dispatch_phase",
+        {"task": "add SSE event", "stage": "plan", "cwd": _CWD},
+    )
     assert out["ok"] is True
     assert out["summary"]["phase_dir"] is not None
 
 
 def test_dispatch_verify_returns_verdict(fleet_url: str, headers: dict) -> None:
-    out = call(fleet_url, headers, "dispatch_verify", {"task": "the auth flow"})
+    out = call(fleet_url, headers, "dispatch_verify", {"task": "the auth flow", "cwd": _CWD})
     assert out["summary"]["verdict"] == "PASS"
 
 
