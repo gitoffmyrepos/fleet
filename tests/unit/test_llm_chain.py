@@ -12,7 +12,6 @@ from unittest.mock import AsyncMock
 import pytest
 
 from fleet.config import Settings
-from fleet.llm import provider_chain as pc
 from fleet.llm.provider_chain import (
     DEFAULT_CHAIN,
     LLMChain,
@@ -45,9 +44,11 @@ def _make_chain(adapters: dict[str, Any], keys: dict[str, str] | None = None) ->
             ("gemini", "gemini-2.5-pro"),
         ],
         keys=keys if keys is not None else default_keys,
+        # 2026-09-17: adapters are per-instance now (a base_url-bound local
+        # adapter must not leak between chains), so inject rather than
+        # rebinding the module-level map after construction.
+        adapters=adapters,
     )
-    # Monkey-patch the adapter map.
-    pc._ADAPTERS = adapters
     return chain
 
 
@@ -234,7 +235,7 @@ async def test_local_rung_used_first_when_key_configured() -> None:
 
     adapter_local = AsyncMock(return_value="from local")
     adapter_anthropic = AsyncMock(return_value="WRONG")
-    pc._ADAPTERS = {
+    chain._adapters = {
         "local": adapter_local,
         "anthropic": adapter_anthropic,
         "openrouter": AsyncMock(return_value="WRONG"),
@@ -262,7 +263,7 @@ async def test_local_transient_error_falls_through_to_anthropic() -> None:
 
     adapter_local = AsyncMock(side_effect=ProviderTransientError("503"))
     adapter_anthropic = AsyncMock(return_value="from opus")
-    pc._ADAPTERS = {
+    chain._adapters = {
         "local": adapter_local,
         "anthropic": adapter_anthropic,
         "openrouter": AsyncMock(return_value="WRONG"),
@@ -289,7 +290,7 @@ async def test_local_rung_absent_when_key_empty() -> None:
     assert chain._chain == DEFAULT_CHAIN
 
     adapter_local = AsyncMock(return_value="WRONG")
-    pc._ADAPTERS = {
+    chain._adapters = {
         "local": adapter_local,
         "anthropic": AsyncMock(return_value="from opus"),
         "openrouter": AsyncMock(return_value="WRONG"),

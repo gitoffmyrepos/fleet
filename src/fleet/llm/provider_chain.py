@@ -115,10 +115,15 @@ class LLMChain:
         chain: list[tuple[str, str]],
         keys: dict[str, str],
         telemetry: Telemetry | None = None,
+        adapters: dict[str, _AdapterFn] | None = None,
     ) -> None:
         self._chain = chain
         self._keys = keys
         self._t = telemetry
+        # Per-instance adapter table. Overrides (e.g. a base_url-bound local
+        # adapter) live here so two chains cannot clobber each other through
+        # the module-level _ADAPTERS dict.
+        self._adapters = {**_ADAPTERS, **(adapters or {})}
 
     @classmethod
     def from_settings(cls, settings: Settings, *, telemetry: Telemetry | None = None) -> LLMChain:
@@ -131,18 +136,19 @@ class LLMChain:
             "gemini": settings.gemini_api_key,
         }
         chain = list(DEFAULT_CHAIN)
+        adapters: dict[str, _AdapterFn] = {}
         if settings.local_llm_api_key:
             # Local-first rung: cheap self-hosted inference before any
             # premium provider; premium rungs remain the fallback.
             chain.insert(0, ("local", settings.local_llm_model))
-            # Bind the configured base_url (FLEET_LOCAL_LLM_BASE_URL) to
-            # the local adapter so the override is honored without
+            # Bind the configured base_url (FLEET_LOCAL_LLM_BASE_URL) to this
+            # chain's local adapter so the override is honored without
             # re-reading Settings on every call.
-            _ADAPTERS["local"] = partial(
+            adapters["local"] = partial(
                 _local.complete,
                 base_url=settings.local_llm_base_url or _local.DEFAULT_BASE_URL,
             )
-        return cls(chain=chain, keys=keys, telemetry=telemetry)
+        return cls(chain=chain, keys=keys, telemetry=telemetry, adapters=adapters)
 
     async def complete(
         self,
@@ -201,7 +207,7 @@ class LLMChain:
                 await self._fire_event(task_id, provider, model, attempt)
                 continue
 
-            adapter = _ADAPTERS[provider]
+            adapter = self._adapters[provider]
             text, attempt = await self._try_rung(
                 adapter=adapter,
                 provider=provider,
