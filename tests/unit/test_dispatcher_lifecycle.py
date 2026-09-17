@@ -223,9 +223,9 @@ async def test_worktree_starts_from_origin_master_not_local_head(
         check=False,
     )
     files = set(out.stdout.split())
-    assert (
-        "feature-only.txt" not in files
-    ), "worktree leaked content from local feature branch into master push"
+    assert "feature-only.txt" not in files, (
+        "worktree leaked content from local feature branch into master push"
+    )
     assert "new.txt" in files
 
 
@@ -362,9 +362,9 @@ async def test_concurrent_master_advance_triggers_rebase(
         task="t",
         isolation="worktree",
     )
-    assert (
-        result.ok is True
-    ), f"dispatch failed: error={result.error!r} note={result.persistence_note!r}"
+    assert result.ok is True, (
+        f"dispatch failed: error={result.error!r} note={result.persistence_note!r}"
+    )
     # Both files must be on master (proves the rebase happened).
     out = subprocess.run(
         ["git", "--git-dir", remote, "ls-tree", "-r", "--name-only", "master"],

@@ -79,6 +79,9 @@ async def complete_openai_compat(
 
     try:
         data = resp.json()
-        return data["choices"][0]["message"]["content"]
+        content = data["choices"][0]["message"]["content"]
+        if not isinstance(content, str):
+            raise ValueError(f"content is {type(content).__name__}, expected str")
+        return content
     except (KeyError, IndexError, ValueError) as e:
         raise ProviderPermanentError(f"{base_url} bad response shape: {e}") from e

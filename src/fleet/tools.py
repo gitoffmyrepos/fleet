@@ -7,6 +7,7 @@ import json
 import logging
 import uuid
 import warnings
+from collections.abc import Awaitable
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any
@@ -30,10 +31,10 @@ class ToolError(RuntimeError):
 
 
 async def _supervise_background_dispatch(
-    coro,
+    coro: Awaitable[Any],
     *,
     task_id: str,
-    telemetry,
+    telemetry: Any,
     label: str,
 ) -> None:
     """Run a backgrounded dispatch coroutine and ensure failures are logged.

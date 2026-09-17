@@ -132,7 +132,7 @@ def build_app(
     async def mcp_jsonrpc(
         body: dict[str, Any],
         authorization: str | None = Header(default=None),
-    ) -> dict[str, Any]:
+    ) -> Any:
         """Standard MCP JSON-RPC 2.0 entrypoint for Claude Code / Goose / OpenClaw."""
         _auth(authorization)
         rpc_id = body.get("id")
@@ -176,8 +176,9 @@ def build_app(
                     "isError": False,
                 }
             elif method == "notifications/initialized":
-                # Notification — no response expected
-                return {"jsonrpc": "2.0", "id": rpc_id, "result": {}}
+                # Notifications must not emit JSON-RPC bodies. Codex rejects
+                # the transport if it receives an `id: null` result here.
+                return Response(status_code=202)
             else:
                 return {
                     "jsonrpc": "2.0",

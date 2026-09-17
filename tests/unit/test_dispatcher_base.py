@@ -432,7 +432,7 @@ def test_verify_commits_claim_without_head_advance_flags() -> None:
 
 def test_verify_tasks_claim_with_real_commits_does_not_flag() -> None:
     """Same claim, but a commit actually landed → no flag."""
-    flag, reason, verified = DispatcherBase._verify_persistence_claims(
+    flag, reason, _verified = DispatcherBase._verify_persistence_claims(
         stdout="RESULT: 5 of 5 tasks complete",
         pre_head="aaaaaaaaaaaa",
         post_head="bbbbbbbbbbbb",
@@ -446,7 +446,7 @@ def test_verify_tasks_claim_with_real_commits_does_not_flag() -> None:
 
 def test_verify_no_cwd_returns_clean() -> None:
     """Without a cwd, verification is a no-op."""
-    flag, reason, verified = DispatcherBase._verify_persistence_claims(
+    flag, _reason, verified = DispatcherBase._verify_persistence_claims(
         stdout="RESULT: 100 of 100 tasks complete",
         pre_head=None,
         post_head=None,
@@ -462,7 +462,7 @@ def test_verify_short_sha_filter_skips_4char_noise() -> None:
     """Tokens shorter than 7 chars (e.g. 'abcd' in random docker ids) are
     not counted as commit references, so no hallucination from coincidence.
     """
-    flag, reason, _ = DispatcherBase._verify_persistence_claims(
+    flag, _reason, _ = DispatcherBase._verify_persistence_claims(
         stdout="container abc123 started ok",  # 6 chars → too short
         pre_head="aaaaaaaaaaaa",
         post_head="aaaaaaaaaaaa",

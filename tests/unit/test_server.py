@@ -110,6 +110,21 @@ async def test_list_tools_endpoint(deps: MagicMock) -> None:
         assert len(names) == 23
 
 
+@pytest.mark.asyncio
+async def test_initialized_notification_returns_empty_ack(deps: MagicMock) -> None:
+    """JSON-RPC notifications carry no id, so they must not get a body back.
+    Codex drops the MCP transport when it receives an `id: null` result."""
+    app = build_app(deps=deps, bearer_token="tok")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        r = await c.post(
+            "/mcp",
+            json={"jsonrpc": "2.0", "method": "notifications/initialized", "params": {}},
+            headers={"authorization": "Bearer tok"},
+        )
+        assert r.status_code == 202
+        assert r.text == ""
+
+
 # ─── 2026-05-12 multi-token rotation tests ─────────────────────────────────
 
 

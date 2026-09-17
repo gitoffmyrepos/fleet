@@ -153,6 +153,6 @@ async def test_handler_response_keys(
 
     r = ToolRegistry(deps)
     out = await r.call(tool, args)
-    assert (
-        set(out.keys()) >= expected_keys
-    ), f"{tool} missing keys: {expected_keys - set(out.keys())}"
+    assert set(out.keys()) >= expected_keys, (
+        f"{tool} missing keys: {expected_keys - set(out.keys())}"
+    )
