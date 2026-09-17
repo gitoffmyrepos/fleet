@@ -73,6 +73,16 @@ class Settings(BaseSettings):
     deepseek_api_key: str = ""
     gemini_api_key: str = ""
 
+    # Local-LLM rung (2026-09-17): self-hosted OpenAI-compatible gateway
+    # (default llm.strategybase.io, qwen3.8-27b). When `local_llm_api_key`
+    # is non-empty, `LLMChain.from_settings` prepends
+    # ("local", local_llm_model) as the FIRST rung of the chain so cheap
+    # local inference is tried before any premium provider; the premium
+    # rungs remain the fallback. Empty key → local rung is absent.
+    local_llm_base_url: str = "https://llm.strategybase.io/v1"
+    local_llm_api_key: str = ""
+    local_llm_model: str = "qwen3.8-27b"
+
     # GitHub PAT for SP-E coordination (claim_issue, peer_review_request).
     # Wired via ExternalSecret fleet-git-creds; same PAT used for git push.
     # If empty, coordination MCP tools degrade gracefully (return error).
