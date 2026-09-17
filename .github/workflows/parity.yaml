@@ -1,13 +1,22 @@
 name: parity
 
+# The parity matrix drives the real claude/goose/openclaw CLIs against a
+# staging Fleet, so it can only run on a self-hosted runner that has those
+# binaries on PATH. No such runner is currently registered
+# (`gh api repos/:owner/:repo/actions/runners` reports 0), so every
+# pull_request trigger sat in `queued` forever and showed up as a check that
+# never completed — it blocked nothing, but it made every PR look unfinished.
+#
+# Keep it on a schedule and make it explicitly runnable, so it starts working
+# again the moment a runner is registered, without hanging PRs in the meantime.
 on:
-  pull_request:
+  workflow_dispatch:
   schedule:
     - cron: "0 4 * * *"
 
 jobs:
   parity:
-    runs-on: self-hosted  # needs claude/goose/openclaw on PATH
+    runs-on: self-hosted # needs claude/goose/openclaw on PATH
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
