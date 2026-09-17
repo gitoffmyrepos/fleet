@@ -53,6 +53,12 @@ _TOOL_DESCRIPTIONS: dict[str, str] = {
     "circuit_close": (
         "Manually close an upstream circuit breaker. Args: name (ruflo|superpowers|gsd)."
     ),
+    "dispatch_local": (
+        "Run up to 6 independent coding subtasks on local Goose/Qwen workers "
+        "via local-fleet (free, isolated git worktrees, exactly once, no retry, "
+        "no merge). Args: repo (existing dir, required), tasks (list of 1-6 "
+        "strings, required), base=master, timeout=2400 (per-task seconds)."
+    ),
 }
 
 

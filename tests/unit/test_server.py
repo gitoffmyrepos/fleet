@@ -105,7 +105,9 @@ async def test_list_tools_endpoint(deps: MagicMock) -> None:
         assert "release_issue" in names
         assert "peer_review_request" in names
         assert "list_claimable_issues" in names
-        assert len(names) == 22
+        # 2026-09-17: local-fleet bridge.
+        assert "dispatch_local" in names
+        assert len(names) == 23
 
 
 # ─── 2026-05-12 multi-token rotation tests ─────────────────────────────────
